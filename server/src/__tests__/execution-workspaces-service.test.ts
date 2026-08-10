@@ -1011,8 +1011,8 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
         returnAssignee: { type: "agent", agentId: coderAgentId },
         reviewRequest: null,
         completedStageIds: [],
-        lastDecisionId: null,
-        lastDecisionOutcome: null,
+        lastDecisionId: randomUUID(),
+        lastDecisionOutcome: "changes_requested",
       },
     });
     await db.insert(executionWorkspaces).values({
