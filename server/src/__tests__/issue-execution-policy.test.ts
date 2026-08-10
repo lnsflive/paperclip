@@ -1372,6 +1372,48 @@ describe("issue execution policy transitions", () => {
         },
       });
     });
+
+    it("does not let re-entry assignee patches steer a multi-participant stage", () => {
+      const policy = makePolicy([
+        {
+          type: "review",
+          participants: [
+            { type: "agent", agentId: qaAgentId },
+            { type: "agent", agentId: coderAgentId },
+          ],
+        },
+      ]);
+      const stageId = policy.stages[0].id;
+      const result = applyIssueExecutionPolicyTransition({
+        issue: {
+          status: "in_progress",
+          assigneeAgentId: coderAgentId,
+          assigneeUserId: null,
+          executionPolicy: policy,
+          executionState: {
+            status: "changes_requested",
+            currentStageId: stageId,
+            currentStageIndex: 0,
+            currentStageType: "review",
+            currentParticipant: { type: "agent", agentId: qaAgentId },
+            returnAssignee: { type: "agent", agentId: coderAgentId },
+            completedStageIds: [],
+            lastDecisionId: "decision-2",
+            lastDecisionOutcome: "changes_requested",
+          },
+        },
+        policy,
+        requestedStatus: "in_review",
+        requestedAssigneePatch: { assigneeAgentId: coderAgentId },
+        actor: { agentId: coderAgentId },
+      });
+
+      expect(result.patch.assigneeAgentId).toBe(qaAgentId);
+      expect(result.patch.executionState).toMatchObject({
+        status: "pending",
+        currentParticipant: { type: "agent", agentId: qaAgentId },
+      });
+    });
   });
 
   describe("user participants", () => {

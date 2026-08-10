@@ -834,19 +834,21 @@ function applyIssueExecutionStageTransition(input: TransitionInput): TransitionR
       : nextPendingStage(input.policy, existingState);
   if (!pendingStage) return { patch };
 
+  const isChangesRequestedReentry = existingState?.status === CHANGES_REQUESTED_STATUS;
   const returnAssignee = existingState?.returnAssignee ?? currentAssignee;
   const skippedStageIds = [...(existingState?.completedStageIds ?? [])];
   let participant = selectStageParticipant(pendingStage, {
     preferred:
-      existingState?.status === CHANGES_REQUESTED_STATUS
-        ? explicitAssignee ?? existingState.currentParticipant ?? null
-        : explicitAssignee,
+      // A change request resumes the same governed stage. Preserve its
+      // configured participant; an assignee patch must not steer the review
+      // back to the executor or another participant.
+      isChangesRequestedReentry ? existingState?.currentParticipant ?? null : explicitAssignee,
     // On a changes-requested re-entry, the configured stage participant is the
     // actor that must perform the requested rework/evidence step.  Excluding
     // returnAssignee here can remove the sole configured participant (the
     // common case when the executor is also the writer), causing an unrelated
     // participant to be selected or a false "no eligible participant" error.
-    exclude: existingState?.status === CHANGES_REQUESTED_STATUS ? null : returnAssignee,
+    exclude: isChangesRequestedReentry ? null : returnAssignee,
   });
   while (!participant && canAutoSkipPendingStage({ stage: pendingStage, returnAssignee, requestedStatus })) {
     skippedStageIds.push(pendingStage.id);
@@ -868,10 +870,8 @@ function applyIssueExecutionStageTransition(input: TransitionInput): TransitionR
     }
     participant = selectStageParticipant(pendingStage, {
       preferred:
-        existingState?.status === CHANGES_REQUESTED_STATUS
-          ? explicitAssignee ?? existingState.currentParticipant ?? null
-          : explicitAssignee,
-      exclude: existingState?.status === CHANGES_REQUESTED_STATUS ? null : returnAssignee,
+        isChangesRequestedReentry ? existingState?.currentParticipant ?? null : explicitAssignee,
+      exclude: isChangesRequestedReentry ? null : returnAssignee,
     });
   }
   if (!participant) {
