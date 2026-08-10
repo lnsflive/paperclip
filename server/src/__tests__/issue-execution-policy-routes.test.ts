@@ -351,6 +351,112 @@ describe("issue execution policy routes", () => {
     );
   });
 
+  it("allows the configured review participant to append required evidence", async () => {
+    const writerAgentId = "44444444-4444-4444-8444-444444444444";
+    const policy = normalizeIssueExecutionPolicy({
+      commentRequired: true,
+      approvalsNeeded: 1,
+      stages: [
+        {
+          id: "11111111-1111-4111-8111-111111111111",
+          type: "review",
+          participants: [{ type: "agent", agentId: writerAgentId }],
+        },
+      ],
+    })!;
+    const issue = {
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      companyId: "company-1",
+      status: "in_review",
+      assigneeAgentId: writerAgentId,
+      assigneeUserId: null,
+      createdByUserId: "local-board",
+      identifier: "PAP-1008",
+      title: "Writer evidence",
+      executionPolicy: policy,
+      executionState: {
+        status: "pending",
+        currentStageId: policy.stages[0].id,
+        currentStageIndex: 0,
+        currentStageType: "review",
+        currentParticipant: { type: "agent", agentId: writerAgentId },
+        returnAssignee: { type: "agent", agentId: "33333333-3333-4333-8333-333333333333" },
+        completedStageIds: [],
+        lastDecisionId: "b6743115-ddef-4215-af3c-b903f4b1864b",
+        lastDecisionOutcome: "changes_requested",
+      },
+    };
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.addComment.mockResolvedValue({ id: "comment-writer", body: "Evidence attached" });
+
+    const res = await request(await createApp({
+      type: "agent",
+      agentId: writerAgentId,
+      companyId: "company-1",
+      runId: "run-writer",
+    }))
+      .post(`/api/issues/${issue.id}/comments`)
+      .send({ body: "Evidence attached", authorType: "agent" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(mockIssueService.addComment).toHaveBeenCalledWith(
+      issue.id,
+      "Evidence attached",
+      expect.objectContaining({ agentId: writerAgentId, runId: "run-writer" }),
+      expect.anything(),
+    );
+  });
+
+  it("rejects the configured review participant's approval attempt when no approval participant exists", async () => {
+    const writerAgentId = "44444444-4444-4444-8444-444444444444";
+    const policy = normalizeIssueExecutionPolicy({
+      commentRequired: true,
+      approvalsNeeded: 1,
+      stages: [
+        {
+          id: "11111111-1111-4111-8111-111111111111",
+          type: "review",
+          participants: [{ type: "agent", agentId: writerAgentId }],
+        },
+      ],
+    })!;
+    const issue = {
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      companyId: "company-1",
+      status: "in_review",
+      assigneeAgentId: writerAgentId,
+      assigneeUserId: null,
+      createdByUserId: "local-board",
+      identifier: "PAP-1009",
+      title: "Writer approval boundary",
+      executionPolicy: policy,
+      executionState: {
+        status: "pending",
+        currentStageId: policy.stages[0].id,
+        currentStageIndex: 0,
+        currentStageType: "review",
+        currentParticipant: { type: "agent", agentId: writerAgentId },
+        returnAssignee: { type: "agent", agentId: "33333333-3333-4333-8333-333333333333" },
+        completedStageIds: [],
+        lastDecisionId: "b6743115-ddef-4215-af3c-b903f4b1864b",
+        lastDecisionOutcome: "changes_requested",
+      },
+    };
+    mockIssueService.getById.mockResolvedValue(issue);
+
+    const res = await request(await createApp({
+      type: "agent",
+      agentId: writerAgentId,
+      companyId: "company-1",
+      runId: "run-writer",
+    }))
+      .patch(`/api/issues/${issue.id}`)
+      .send({ status: "done" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(422);
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
   it("allows an agent-authored in_review transition with a scheduled monitor", async () => {
     const issue = {
       id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
