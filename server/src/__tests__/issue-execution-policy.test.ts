@@ -1331,6 +1331,49 @@ describe("issue execution policy transitions", () => {
     });
   });
 
+  describe("changes-requested re-entry participant resolution", () => {
+    it("keeps the configured sole participant when it is also the return assignee", () => {
+      const policy = reviewOnlyPolicy();
+      const stageId = policy.stages[0].id;
+      const result = applyIssueExecutionPolicyTransition({
+        issue: {
+          status: "in_progress",
+          assigneeAgentId: coderAgentId,
+          assigneeUserId: null,
+          executionPolicy: policy,
+          executionState: {
+            status: "changes_requested",
+            currentStageId: stageId,
+            currentStageIndex: 0,
+            currentStageType: "review",
+            currentParticipant: { type: "agent", agentId: coderAgentId },
+            returnAssignee: { type: "agent", agentId: coderAgentId },
+            completedStageIds: [],
+            lastDecisionId: "decision-1",
+            lastDecisionOutcome: "changes_requested",
+          },
+        },
+        policy,
+        requestedStatus: "in_review",
+        requestedAssigneePatch: {},
+        actor: { userId: boardUserId },
+      });
+
+      expect(result.patch).toMatchObject({
+        status: "in_review",
+        assigneeAgentId: coderAgentId,
+        executionState: {
+          status: "pending",
+          currentStageId: stageId,
+          currentParticipant: { type: "agent", agentId: coderAgentId },
+          returnAssignee: { type: "agent", agentId: coderAgentId },
+          lastDecisionId: "decision-1",
+          lastDecisionOutcome: "changes_requested",
+        },
+      });
+    });
+  });
+
   describe("user participants", () => {
     it("handles user-type reviewer participant correctly", () => {
       const policy = makePolicy([

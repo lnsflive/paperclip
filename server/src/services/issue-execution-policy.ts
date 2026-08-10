@@ -841,7 +841,12 @@ function applyIssueExecutionStageTransition(input: TransitionInput): TransitionR
       existingState?.status === CHANGES_REQUESTED_STATUS
         ? explicitAssignee ?? existingState.currentParticipant ?? null
         : explicitAssignee,
-    exclude: returnAssignee,
+    // On a changes-requested re-entry, the configured stage participant is the
+    // actor that must perform the requested rework/evidence step.  Excluding
+    // returnAssignee here can remove the sole configured participant (the
+    // common case when the executor is also the writer), causing an unrelated
+    // participant to be selected or a false "no eligible participant" error.
+    exclude: existingState?.status === CHANGES_REQUESTED_STATUS ? null : returnAssignee,
   });
   while (!participant && canAutoSkipPendingStage({ stage: pendingStage, returnAssignee, requestedStatus })) {
     skippedStageIds.push(pendingStage.id);
@@ -866,7 +871,7 @@ function applyIssueExecutionStageTransition(input: TransitionInput): TransitionR
         existingState?.status === CHANGES_REQUESTED_STATUS
           ? explicitAssignee ?? existingState.currentParticipant ?? null
           : explicitAssignee,
-      exclude: returnAssignee,
+      exclude: existingState?.status === CHANGES_REQUESTED_STATUS ? null : returnAssignee,
     });
   }
   if (!participant) {
