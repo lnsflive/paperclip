@@ -3469,6 +3469,7 @@ export function issueRoutes(
         ? executionPolicy?.stages.find((stage) => stage.id === executionState.currentStageId) ?? null
         : null;
       if (
+        issue.status === "in_review" &&
         executionState?.status === "pending" &&
         currentStage?.participants.some((participant) =>
           participant.type === "agent" && participant.agentId === actorAgentId,

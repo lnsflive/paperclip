@@ -42,6 +42,9 @@ const mockDbSelectFrom = vi.hoisted(() => vi.fn(() => ({ where: mockDbSelectWher
 const mockDbSelect = vi.hoisted(() => vi.fn(() => ({ from: mockDbSelectFrom })));
 const mockDb = vi.hoisted(() => ({
   select: mockDbSelect,
+  transaction: vi.fn(async (callback: (tx: { insert: typeof mockDbSelect }) => unknown) => callback({
+    insert: vi.fn(() => ({ values: vi.fn(async () => undefined) })),
+  })),
 }));
 
 const mockLogActivity = vi.hoisted(() => vi.fn(async () => undefined));
@@ -465,6 +468,72 @@ describe("issue execution policy routes", () => {
 
     expect(res.status, JSON.stringify(res.body)).toBe(422);
     expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  it("atomically appends the participant's approval evidence and advances the stage", async () => {
+    const writerAgentId = "44444444-4444-4444-8444-444444444444";
+    const approverAgentId = "66666666-6666-4666-8666-666666666666";
+    const policy = normalizeIssueExecutionPolicy({
+      commentRequired: true,
+      approvalsNeeded: 1,
+      stages: [
+        {
+          id: "11111111-1111-4111-8111-111111111111",
+          type: "review",
+          participants: [{ type: "agent", agentId: writerAgentId }],
+        },
+        {
+          id: "22222222-2222-4222-8222-222222222222",
+          type: "approval",
+          participants: [{ type: "agent", agentId: approverAgentId }],
+        },
+      ],
+    })!;
+    const issue = {
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      companyId: "company-1",
+      status: "in_review",
+      assigneeAgentId: writerAgentId,
+      assigneeUserId: null,
+      createdByUserId: "local-board",
+      identifier: "PAP-1011",
+      title: "Writer approval evidence",
+      executionPolicy: policy,
+      executionState: {
+        status: "pending",
+        currentStageId: policy.stages[0].id,
+        currentStageIndex: 0,
+        currentStageType: "review",
+        currentParticipant: { type: "agent", agentId: writerAgentId },
+        returnAssignee: { type: "agent", agentId: "33333333-3333-4333-8333-333333333333" },
+        completedStageIds: [],
+        lastDecisionId: "b6743115-ddef-4215-af3c-b903f4b1864b",
+        lastDecisionOutcome: "changes_requested",
+      },
+    };
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.addComment.mockResolvedValue({ id: "comment-atomic", body: "kind: review\ndecision: approved" });
+    mockIssueService.update.mockResolvedValue({ ...issue, status: "in_review" });
+
+    const res = await request(await createApp({
+      type: "agent",
+      agentId: writerAgentId,
+      companyId: "company-1",
+      runId: "run-writer",
+    }))
+      .post(`/api/issues/${issue.id}/comments`)
+      .send({ body: "kind: review\ndecision: approved", authorType: "agent" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(mockDb.transaction).toHaveBeenCalled();
+    expect(mockIssueService.addComment).toHaveBeenCalledWith(
+      issue.id,
+      "kind: review\ndecision: approved",
+      expect.objectContaining({ agentId: writerAgentId, runId: "run-writer" }),
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(mockIssueService.update).toHaveBeenCalled();
   });
 
   it("does not trust a stale execution participant absent from the current policy stage", async () => {
