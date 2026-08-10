@@ -582,6 +582,73 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
     expect(persisted?.updatedAt.toISOString()).toBe(fixedUpdatedAt.toISOString());
   });
 
+  it("reconciles direct in_review restores through the execution policy helper", async () => {
+    const companyId = await seedAssignableAgentCompany();
+    const coderAgentId = randomUUID();
+    const reviewerAgentId = randomUUID();
+    await db.insert(agents).values([
+      agentRow(companyId, { id: coderAgentId, name: "Coder" }),
+      agentRow(companyId, { id: reviewerAgentId, name: "Reviewer" }),
+    ]);
+    const issue = await svc.create(companyId, {
+      title: "Direct restore reconciliation",
+      description: null,
+      status: "in_progress",
+      priority: "medium",
+      assigneeAgentId: coderAgentId,
+      executionPolicy: {
+        mode: "normal",
+        commentRequired: true,
+        stages: [
+          {
+            id: "bb02dbe0-a6fb-4c86-b922-8b8bfcd428ae",
+            type: "review",
+            approvalsNeeded: 1,
+            participants: [
+              {
+                id: "7e13ec36-3d98-4faf-9748-c705aaec4282",
+                type: "agent",
+                agentId: reviewerAgentId,
+                userId: null,
+              },
+            ],
+          },
+        ],
+      },
+      executionState: {
+        status: "changes_requested",
+        currentStageId: "bb02dbe0-a6fb-4c86-b922-8b8bfcd428ae",
+        currentStageIndex: 0,
+        currentStageType: "review",
+        currentParticipant: { type: "agent", agentId: reviewerAgentId },
+        returnAssignee: { type: "agent", agentId: coderAgentId },
+        completedStageIds: ["2c52f4cc-9c76-4513-a2f5-cf5cea6e1d4b"],
+        lastDecisionId: "d6746caf-e8ae-4499-8ccf-3fc9533851a5",
+        lastDecisionOutcome: "changes_requested",
+      },
+    });
+
+    const restored = await svc.update(issue.id, {
+      status: "in_review",
+      actorUserId: "local-board",
+    });
+
+    expect(restored).toMatchObject({
+      status: "in_review",
+      assigneeAgentId: reviewerAgentId,
+      assigneeUserId: null,
+      executionState: {
+        status: "pending",
+        currentStageId: "bb02dbe0-a6fb-4c86-b922-8b8bfcd428ae",
+        currentStageType: "review",
+        currentParticipant: { type: "agent", agentId: reviewerAgentId },
+        returnAssignee: { type: "agent", agentId: coderAgentId },
+        lastDecisionId: "d6746caf-e8ae-4499-8ccf-3fc9533851a5",
+        lastDecisionOutcome: "changes_requested",
+      },
+    });
+  });
+
   it("rejects checkout by a terminated agent before assigning the issue", async () => {
     const companyId = await seedAssignableAgentCompany();
     const terminatedAgentId = randomUUID();

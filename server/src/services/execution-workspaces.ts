@@ -1824,6 +1824,7 @@ export function executionWorkspaceService(db: Db) {
             .select({
               id: issues.id,
               companyId: issues.companyId,
+              updatedAt: issues.updatedAt,
               status: issues.status,
               assigneeAgentId: issues.assigneeAgentId,
               assigneeUserId: issues.assigneeUserId,
@@ -1865,6 +1866,15 @@ export function executionWorkspaceService(db: Db) {
               actorUserId: input.actor.actorType === "user" ? input.actor.actorId : null,
             },
             tx,
+            {
+              expectedUpdatedAt: sourceBefore.updatedAt,
+              expectedRoutingState: {
+                status: sourceBefore.status,
+                assigneeAgentId: sourceBefore.assigneeAgentId,
+                assigneeUserId: sourceBefore.assigneeUserId,
+                executionState: sourceBefore.executionState,
+              },
+            },
           );
           if (!updatedIssue) throw notFound("Source issue not found");
           restoredSourceIssue = {

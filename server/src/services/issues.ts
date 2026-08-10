@@ -84,7 +84,11 @@ import {
   type ParsedExecutionWorkspaceMode,
 } from "./execution-workspace-policy.js";
 import { mergeExecutionWorkspaceConfig } from "./execution-workspaces.js";
-import { buildInitialIssueMonitorFields, normalizeIssueExecutionPolicy } from "./issue-execution-policy.js";
+import {
+  applyIssueExecutionPolicyTransition,
+  buildInitialIssueMonitorFields,
+  normalizeIssueExecutionPolicy,
+} from "./issue-execution-policy.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { redactCurrentUserText } from "../log-redaction.js";
 import { redactSensitiveText } from "../redaction.js";
@@ -6596,6 +6600,43 @@ export function issueService(db: Db) {
           executionWorkspacePreference: nextExecutionWorkspacePreference ?? null,
           executionWorkspaceSettings: issueData.executionWorkspaceSettings,
         });
+      }
+
+      if (
+        issueData.status === "in_review" &&
+        issueData.executionState === undefined &&
+        issueData.executionPolicy === undefined
+      ) {
+        const existingPolicy = normalizeIssueExecutionPolicy(existing.executionPolicy ?? null);
+        if (existingPolicy) {
+          const transition = applyIssueExecutionPolicyTransition({
+            issue: {
+              status: existing.status,
+              assigneeAgentId: existing.assigneeAgentId,
+              assigneeUserId: existing.assigneeUserId,
+              executionPolicy: existing.executionPolicy,
+              executionState: existing.executionState,
+              monitorNextCheckAt: existing.monitorNextCheckAt,
+              monitorWakeRequestedAt: existing.monitorWakeRequestedAt,
+              monitorLastTriggeredAt: existing.monitorLastTriggeredAt,
+              monitorAttemptCount: existing.monitorAttemptCount,
+              monitorNotes: existing.monitorNotes,
+              monitorScheduledBy: existing.monitorScheduledBy,
+            },
+            policy: existingPolicy,
+            previousPolicy: existingPolicy,
+            requestedStatus: "in_review",
+            requestedAssigneePatch: {
+              assigneeAgentId: issueData.assigneeAgentId,
+              assigneeUserId: issueData.assigneeUserId,
+            },
+            actor: {
+              agentId: actorAgentId ?? null,
+              userId: actorUserId ?? null,
+            },
+          });
+          Object.assign(patch, transition.patch);
+        }
       }
 
       applyStatusSideEffects(issueData.status, patch);
