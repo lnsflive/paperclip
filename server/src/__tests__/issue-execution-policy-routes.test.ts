@@ -415,6 +415,67 @@ describe("issue execution policy routes", () => {
     );
   });
 
+  it("re-enters the configured participant on the exact changes-requested PATCH path", async () => {
+    const writerAgentId = "44444444-4444-4444-8444-444444444444";
+    const executorAgentId = "33333333-3333-4333-8333-333333333333";
+    const stageId = "11111111-1111-4111-8111-111111111111";
+    const decisionId = "b6743115-ddef-4215-af3c-b903f4b1864b";
+    const policy = normalizeIssueExecutionPolicy({
+      commentRequired: true,
+      approvalsNeeded: 1,
+      stages: [
+        { id: stageId, type: "review", participants: [{ type: "agent", agentId: writerAgentId }] },
+        { id: "22222222-2222-4222-8222-222222222222", type: "approval", participants: [] },
+      ],
+    })!;
+    const issue = {
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      companyId: "company-1",
+      status: "in_progress",
+      assigneeAgentId: executorAgentId,
+      assigneeUserId: null,
+      createdByUserId: "local-board",
+      identifier: "PAP-1012",
+      title: "Changes-requested re-entry",
+      executionPolicy: policy,
+      executionState: {
+        status: "changes_requested",
+        currentStageId: stageId,
+        currentStageIndex: 0,
+        currentStageType: "review",
+        currentParticipant: { type: "agent", agentId: writerAgentId },
+        returnAssignee: { type: "agent", agentId: executorAgentId },
+        completedStageIds: [],
+        lastDecisionId: decisionId,
+        lastDecisionOutcome: "changes_requested",
+      },
+    };
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({ ...issue, ...patch }));
+
+    const res = await request(await createApp())
+      .patch(`/api/issues/${issue.id}`)
+      .send({ status: "in_review", assigneeAgentId: executorAgentId });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    const patch = mockIssueService.update.mock.calls[0]?.[1] as Record<string, any>;
+    expect(patch).toMatchObject({
+      status: "in_review",
+      assigneeAgentId: writerAgentId,
+      executionState: {
+        status: "pending",
+        currentStageId: stageId,
+        currentStageIndex: 0,
+        currentStageType: "review",
+        currentParticipant: { type: "agent", agentId: writerAgentId },
+        returnAssignee: { type: "agent", agentId: executorAgentId },
+        lastDecisionOutcome: "changes_requested",
+      },
+    });
+    expect(patch.executionState.lastDecisionId).toBe(decisionId);
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalled();
+  });
+
   it("rejects the configured review participant's approval attempt when no approval participant exists", async () => {
     const writerAgentId = "44444444-4444-4444-8444-444444444444";
     const policy = normalizeIssueExecutionPolicy({
