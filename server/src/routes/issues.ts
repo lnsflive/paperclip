@@ -178,6 +178,7 @@ import {
   setIssueExecutionPolicyMonitorScheduledBy,
 } from "../services/issue-execution-policy.js";
 import { parseIssueExecutionWorkspaceSettings } from "../services/execution-workspace-policy.js";
+import { terminalizeOrphanExecutionProjection } from "../services/recovery/service.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import {
   buildPromotedSourceTrust,
@@ -5697,6 +5698,28 @@ export function issueRoutes(
       },
       recoveryAction: result.recoveryAction,
     });
+  });
+
+  router.post("/issues/:id/execution-projection/terminalize", async (req, res) => {
+    const issue = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Issue not found");
+    if (!issue) return;
+    if (!(await assertIssueReadAllowed(req, res, issue))) return;
+    if (req.actor.type !== "user" && req.actor.type !== "agent") return res.status(403).json({ error: "Unsupported actor" });
+    const body = req.body as Record<string, unknown>;
+    if (typeof body.recoveryActionId !== "string" || typeof body.reason !== "string" || !Array.isArray(body.evidencePointers) || !body.expectedExecutionState || typeof body.expectedExecutionState !== "object") {
+      return res.status(400).json({ error: "recoveryActionId, reason, evidencePointers, and expectedExecutionState are required" });
+    }
+    const result = await terminalizeOrphanExecutionProjection(db, {
+      companyId: issue.companyId,
+      issueId: issue.id,
+      recoveryActionId: body.recoveryActionId,
+      reason: body.reason,
+      evidencePointers: body.evidencePointers.filter((value): value is string => typeof value === "string"),
+      expectedExecutionState: body.expectedExecutionState as Record<string, unknown>,
+      actor: { type: req.actor.type, id: req.actor.id, agentId: req.actor.agentId ?? null, runId: req.actor.runId ?? null },
+    });
+    if (!result) return res.status(409).json({ error: "Orphan execution CAS preconditions did not match; no mutation performed" });
+    return res.json({ issue: result });
   });
 
   router.get("/issues/:id/work-products", async (req, res) => {

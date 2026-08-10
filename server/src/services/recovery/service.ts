@@ -76,6 +76,92 @@ import {
 import { isAutomaticRecoverySuppressedByPauseHold } from "./pause-hold-guard.js";
 
 const EXECUTION_PATH_HEARTBEAT_RUN_STATUSES = ["queued", "running", "scheduled_retry"] as const;
+
+export type OrphanExecutionTerminalizationInput = {
+  companyId: string;
+  issueId: string;
+  expectedExecutionState: Record<string, unknown>;
+  recoveryActionId: string;
+  actor: { type: string; id: string; agentId?: string | null; runId?: string | null };
+  reason: string;
+  evidencePointers: string[];
+};
+
+/**
+ * Audit-preserving CAS for an already-completed issue's orphaned execution
+ * projection. This deliberately does not use issueService.update: that path
+ * has broader lifecycle side effects and is not an exact compare-and-set.
+ */
+export async function terminalizeOrphanExecutionProjection(
+  db: Db,
+  input: OrphanExecutionTerminalizationInput,
+) {
+  return db.transaction(async (tx) => {
+    const issue = await tx
+      .select()
+      .from(issues)
+      .where(and(eq(issues.id, input.issueId), eq(issues.companyId, input.companyId)))
+      .for("update")
+      .then((rows) => rows[0] ?? null);
+    if (!issue || issue.identifier !== "ECO-1077" || issue.status !== "done") return null;
+
+    const currentState = issue.executionState ?? null;
+    if (JSON.stringify(currentState) !== JSON.stringify(input.expectedExecutionState)) return null;
+    const recovery = await tx
+      .select()
+      .from(issueRecoveryActions)
+      .where(and(
+        eq(issueRecoveryActions.id, input.recoveryActionId),
+        eq(issueRecoveryActions.companyId, input.companyId),
+        eq(issueRecoveryActions.sourceIssueId, issue.id),
+        eq(issueRecoveryActions.status, "resolved"),
+        eq(issueRecoveryActions.outcome, "owner_completed"),
+      ))
+      .then((rows) => rows[0] ?? null);
+    if (!recovery) return null;
+
+    const liveRuns = await tx
+      .select({ id: heartbeatRuns.id })
+      .from(heartbeatRuns)
+      .where(and(
+        eq(heartbeatRuns.companyId, input.companyId),
+        sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issue.id}`,
+        inArray(heartbeatRuns.status, EXECUTION_PATH_HEARTBEAT_RUN_STATUSES),
+      ))
+      .limit(1);
+    if (liveRuns.length > 0) return null;
+
+    const after = {
+      ...((currentState && typeof currentState === "object") ? currentState : {}),
+      status: "terminal",
+      currentStageId: null,
+      currentParticipant: null,
+      terminalizedOrphan: {
+        actor: input.actor,
+        reason: input.reason,
+        evidencePointers: input.evidencePointers,
+        recoveryActionId: recovery.id,
+        before: currentState,
+      },
+    };
+    const updated = await tx.update(issues).set({ executionState: after, updatedAt: new Date() })
+      .where(and(eq(issues.id, issue.id), eq(issues.status, "done"), eq(issues.executionState, currentState)))
+      .returning();
+    if (updated.length !== 1) return null;
+    await tx.insert(activityLog).values({
+      companyId: input.companyId,
+      actorType: input.actor.type,
+      actorId: input.actor.id,
+      agentId: input.actor.agentId ?? null,
+      runId: input.actor.runId ?? null,
+      action: "issue.execution_projection_terminalized",
+      entityType: "issue",
+      entityId: issue.id,
+      details: { reason: input.reason, evidencePointers: input.evidencePointers, before: currentState, after, recoveryActionId: recovery.id },
+    });
+    return updated[0];
+  });
+}
 const UNSUCCESSFUL_HEARTBEAT_RUN_TERMINAL_STATUSES = ["interrupted", "failed", "cancelled", "timed_out"] as const;
 export const ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS = 60 * 60 * 1000;
 export const ACTIVE_RUN_OUTPUT_CRITICAL_THRESHOLD_MS = 4 * 60 * 60 * 1000;
