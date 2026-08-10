@@ -468,6 +468,23 @@ function selectStageParticipant(
   return first ? { type: first.type, agentId: first.agentId ?? null, userId: first.userId ?? null } : null;
 }
 
+function selectChangesRequestedParticipant(
+  stage: IssueExecutionStage,
+  currentParticipant: IssueExecutionStagePrincipal | null,
+  returnAssignee: IssueExecutionStagePrincipal | null,
+) {
+  // A stale state may retain the executor as currentParticipant after a
+  // changes-requested return. In a multi-participant stage that must not steer
+  // the stage back to the executor; prefer the configured non-executor member.
+  // A sole participant is allowed to equal the executor, preserving writer
+  // stages whose configured participant is also the implementation agent.
+  const excludeReturnAssignee = stage.participants.length > 1 ? returnAssignee : null;
+  return selectStageParticipant(stage, {
+    preferred: currentParticipant,
+    exclude: excludeReturnAssignee,
+  }) ?? selectStageParticipant(stage);
+}
+
 function stageHasParticipant(stage: IssueExecutionStage, participant: IssueExecutionStagePrincipal | null): boolean {
   if (!participant) return false;
   return stage.participants.some((candidate) => principalsEqual(candidate, participant));
@@ -837,19 +854,9 @@ function applyIssueExecutionStageTransition(input: TransitionInput): TransitionR
   const isChangesRequestedReentry = existingState?.status === CHANGES_REQUESTED_STATUS;
   const returnAssignee = existingState?.returnAssignee ?? currentAssignee;
   const skippedStageIds = [...(existingState?.completedStageIds ?? [])];
-  let participant = selectStageParticipant(pendingStage, {
-    preferred:
-      // A change request resumes the same governed stage. Preserve its
-      // configured participant; an assignee patch must not steer the review
-      // back to the executor or another participant.
-      isChangesRequestedReentry ? existingState?.currentParticipant ?? null : explicitAssignee,
-    // On a changes-requested re-entry, the configured stage participant is the
-    // actor that must perform the requested rework/evidence step.  Excluding
-    // returnAssignee here can remove the sole configured participant (the
-    // common case when the executor is also the writer), causing an unrelated
-    // participant to be selected or a false "no eligible participant" error.
-    exclude: isChangesRequestedReentry ? null : returnAssignee,
-  });
+  let participant = isChangesRequestedReentry
+    ? selectChangesRequestedParticipant(pendingStage, existingState?.currentParticipant ?? null, returnAssignee)
+    : selectStageParticipant(pendingStage, { preferred: explicitAssignee, exclude: returnAssignee });
   while (!participant && canAutoSkipPendingStage({ stage: pendingStage, returnAssignee, requestedStatus })) {
     skippedStageIds.push(pendingStage.id);
     pendingStage = nextPendingStage(
@@ -868,11 +875,9 @@ function applyIssueExecutionStageTransition(input: TransitionInput): TransitionR
       });
       return { patch };
     }
-    participant = selectStageParticipant(pendingStage, {
-      preferred:
-        isChangesRequestedReentry ? existingState?.currentParticipant ?? null : explicitAssignee,
-      exclude: isChangesRequestedReentry ? null : returnAssignee,
-    });
+    participant = isChangesRequestedReentry
+      ? selectChangesRequestedParticipant(pendingStage, existingState?.currentParticipant ?? null, returnAssignee)
+      : selectStageParticipant(pendingStage, { preferred: explicitAssignee, exclude: returnAssignee });
   }
   if (!participant) {
     throw unprocessable(`No eligible ${pendingStage.type} participant is configured for this issue`);

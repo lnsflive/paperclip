@@ -464,6 +464,49 @@ describe("issue execution policy transitions", () => {
         currentParticipant: { type: "agent", agentId: qaAgentId },
       });
     });
+
+    it("does not re-enter a multi-participant stage through the stored return assignee", () => {
+      const multiParticipantPolicy = makePolicy([
+        {
+          type: "review",
+          participants: [
+            { type: "agent", agentId: coderAgentId },
+            { type: "agent", agentId: qaAgentId },
+          ],
+        },
+      ]);
+      const stageId = multiParticipantPolicy.stages[0].id;
+
+      const result = applyIssueExecutionPolicyTransition({
+        issue: {
+          status: "in_progress",
+          assigneeAgentId: coderAgentId,
+          assigneeUserId: null,
+          executionPolicy: multiParticipantPolicy,
+          executionState: {
+            status: "changes_requested",
+            currentStageId: stageId,
+            currentStageIndex: 0,
+            currentStageType: "review",
+            currentParticipant: { type: "agent", agentId: coderAgentId },
+            returnAssignee: { type: "agent", agentId: coderAgentId },
+            completedStageIds: [],
+            lastDecisionId: "decision-1",
+            lastDecisionOutcome: "changes_requested",
+          },
+        },
+        policy: multiParticipantPolicy,
+        requestedStatus: "done",
+        requestedAssigneePatch: {},
+        actor: { agentId: coderAgentId },
+        commentBody: "Writer evidence is ready",
+      });
+
+      expect(result.patch.assigneeAgentId).toBe(qaAgentId);
+      expect(result.patch.executionState).toMatchObject({
+        currentParticipant: { type: "agent", agentId: qaAgentId },
+      });
+    });
   });
 
   describe("review-only policy (no approval stage)", () => {
