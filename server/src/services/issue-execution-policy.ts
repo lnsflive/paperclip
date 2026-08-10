@@ -468,23 +468,6 @@ function selectStageParticipant(
   return first ? { type: first.type, agentId: first.agentId ?? null, userId: first.userId ?? null } : null;
 }
 
-function selectNextStageParticipant(
-  stage: IssueExecutionStage,
-  opts?: {
-    preferred?: IssueExecutionStagePrincipal | null;
-    returnAssignee?: IssueExecutionStagePrincipal | null;
-  },
-): IssueExecutionStagePrincipal | null {
-  const nonReturningParticipant = selectStageParticipant(stage, {
-    preferred: opts?.preferred,
-    exclude: opts?.returnAssignee ?? null,
-  });
-  if (nonReturningParticipant) return nonReturningParticipant;
-
-  const returnAssignee = opts?.returnAssignee ?? null;
-  return stageHasParticipant(stage, returnAssignee) ? returnAssignee : null;
-}
-
 function stageHasParticipant(stage: IssueExecutionStage, participant: IssueExecutionStagePrincipal | null): boolean {
   if (!participant) return false;
   return stage.participants.some((candidate) => principalsEqual(candidate, participant));
@@ -748,9 +731,9 @@ function applyIssueExecutionStageTransition(input: TransitionInput): TransitionR
           };
         }
 
-        const participant = selectNextStageParticipant(nextStage, {
+        const participant = selectStageParticipant(nextStage, {
           preferred: explicitAssignee,
-          returnAssignee: existingState?.returnAssignee ?? currentAssignee ?? actor,
+          exclude: existingState?.returnAssignee ?? currentAssignee ?? actor,
         });
         if (!participant) {
           throw unprocessable(`No eligible ${nextStage.type} participant is configured for this issue`);

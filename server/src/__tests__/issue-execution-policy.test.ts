@@ -1178,16 +1178,53 @@ describe("issue execution policy transitions", () => {
       });
     });
 
-    it("allows the next configured stage to return to the original executor", () => {
+    it("fails closed when the next configured stage only contains the original executor", () => {
       const policy = makePolicy([
         { type: "review", participants: [{ type: "agent", agentId: qaAgentId }] },
         { type: "review", participants: [{ type: "agent", agentId: coderAgentId }] },
       ]);
 
+      expect(() =>
+        applyIssueExecutionPolicyTransition({
+          issue: {
+            status: "in_review",
+            assigneeAgentId: qaAgentId,
+            assigneeUserId: null,
+            executionPolicy: policy,
+            executionState: {
+              status: "pending",
+              currentStageId: policy.stages[0].id,
+              currentStageIndex: 0,
+              currentStageType: "review",
+              currentParticipant: { type: "agent", agentId: qaAgentId },
+              returnAssignee: { type: "agent", agentId: coderAgentId },
+              completedStageIds: [],
+              lastDecisionId: null,
+              lastDecisionOutcome: null,
+            },
+          },
+          policy,
+          requestedStatus: "done",
+          requestedAssigneePatch: {},
+          actor: { agentId: qaAgentId },
+          commentBody: "Security review approved",
+        }),
+      ).toThrow("No eligible review participant is configured for this issue");
+    });
+
+    it("routes the preserved ECO-1174 security approval shape to Lead Engineer", () => {
+      const appSecurityAgentId = "c5818483-432d-4343-84bc-f9d20f7c8348";
+      const leadEngineerAgentId = "bb02dbe0-a6fb-4c86-b922-8b8bfcd428ae";
+      const implementationAgentId = coderAgentId;
+      const policy = makePolicy([
+        { type: "review", participants: [{ type: "agent", agentId: appSecurityAgentId }] },
+        { type: "review", participants: [{ type: "agent", agentId: leadEngineerAgentId }] },
+      ]);
+
       const result = applyIssueExecutionPolicyTransition({
         issue: {
           status: "in_review",
-          assigneeAgentId: qaAgentId,
+          assigneeAgentId: appSecurityAgentId,
           assigneeUserId: null,
           executionPolicy: policy,
           executionState: {
@@ -1195,31 +1232,31 @@ describe("issue execution policy transitions", () => {
             currentStageId: policy.stages[0].id,
             currentStageIndex: 0,
             currentStageType: "review",
-            currentParticipant: { type: "agent", agentId: qaAgentId },
-            returnAssignee: { type: "agent", agentId: coderAgentId },
+            currentParticipant: { type: "agent", agentId: appSecurityAgentId },
+            returnAssignee: { type: "agent", agentId: implementationAgentId },
             completedStageIds: [],
             lastDecisionId: null,
-            lastDecisionOutcome: null,
+            lastDecisionOutcome: "changes_requested",
           },
         },
         policy,
         requestedStatus: "done",
         requestedAssigneePatch: {},
-        actor: { agentId: qaAgentId },
-        commentBody: "Security review approved",
+        actor: { agentId: appSecurityAgentId },
+        commentBody: "Approved; preserve prior decision history and advance",
       });
 
       expect(result.patch).toMatchObject({
         status: "in_review",
-        assigneeAgentId: coderAgentId,
+        assigneeAgentId: leadEngineerAgentId,
         assigneeUserId: null,
         executionState: {
           status: "pending",
           currentStageId: policy.stages[1].id,
           currentStageIndex: 1,
           currentStageType: "review",
-          currentParticipant: { type: "agent", agentId: coderAgentId },
-          returnAssignee: { type: "agent", agentId: coderAgentId },
+          currentParticipant: { type: "agent", agentId: leadEngineerAgentId },
+          returnAssignee: { type: "agent", agentId: implementationAgentId },
           completedStageIds: [policy.stages[0].id],
           lastDecisionOutcome: "approved",
         },
