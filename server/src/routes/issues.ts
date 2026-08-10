@@ -3431,6 +3431,7 @@ export function issueRoutes(
       status: string;
       assigneeAgentId: string | null;
       assigneeUserId: string | null;
+      executionPolicy?: unknown;
       executionState?: unknown;
     },
   ) {
@@ -3463,8 +3464,15 @@ export function issueRoutes(
       // company/resource access was already established by getAccessibleResource,
       // and only the typed active execution participant may use it.
       const executionState = parseIssueExecutionState(issue.executionState);
+      const executionPolicy = normalizeIssueExecutionPolicy(issue.executionPolicy ?? null);
+      const currentStage = executionState?.currentStageId
+        ? executionPolicy?.stages.find((stage) => stage.id === executionState.currentStageId) ?? null
+        : null;
       if (
         executionState?.status === "pending" &&
+        currentStage?.participants.some((participant) =>
+          participant.type === "agent" && participant.agentId === actorAgentId,
+        ) &&
         actorMatchesExecutionParticipant(
           { actorType: "agent", actorId: actorAgentId },
           executionState.currentParticipant,

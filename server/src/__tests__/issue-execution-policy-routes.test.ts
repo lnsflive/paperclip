@@ -362,6 +362,11 @@ describe("issue execution policy routes", () => {
           type: "review",
           participants: [{ type: "agent", agentId: writerAgentId }],
         },
+        {
+          id: "22222222-2222-4222-8222-222222222222",
+          type: "approval",
+          participants: [],
+        },
       ],
     })!;
     const issue = {
@@ -418,6 +423,11 @@ describe("issue execution policy routes", () => {
           type: "review",
           participants: [{ type: "agent", agentId: writerAgentId }],
         },
+        {
+          id: "22222222-2222-4222-8222-222222222222",
+          type: "approval",
+          participants: [],
+        },
       ],
     })!;
     const issue = {
@@ -455,6 +465,51 @@ describe("issue execution policy routes", () => {
 
     expect(res.status, JSON.stringify(res.body)).toBe(422);
     expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  it("does not trust a stale execution participant absent from the current policy stage", async () => {
+    const writerAgentId = "44444444-4444-4444-8444-444444444444";
+    const staleAgentId = "55555555-5555-4555-8555-555555555555";
+    const policy = normalizeIssueExecutionPolicy({
+      stages: [{
+        id: "11111111-1111-4111-8111-111111111111",
+        type: "review",
+        participants: [{ type: "agent", agentId: writerAgentId }],
+      }],
+    })!;
+    const issue = {
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      companyId: "company-1",
+      status: "in_review",
+      assigneeAgentId: staleAgentId,
+      assigneeUserId: null,
+      createdByUserId: "local-board",
+      identifier: "PAP-1010",
+      title: "Stale execution participant",
+      executionPolicy: policy,
+      executionState: {
+        status: "pending",
+        currentStageId: policy.stages[0].id,
+        currentStageIndex: 0,
+        currentStageType: "review",
+        currentParticipant: { type: "agent", agentId: staleAgentId },
+        returnAssignee: { type: "agent", agentId: "33333333-3333-4333-8333-333333333333" },
+        completedStageIds: [],
+      },
+    };
+    mockIssueService.getById.mockResolvedValue(issue);
+
+    const res = await request(await createApp({
+      type: "agent",
+      agentId: staleAgentId,
+      companyId: "company-1",
+      runId: "run-stale",
+    }))
+      .post(`/api/issues/${issue.id}/comments`)
+      .send({ body: "stale evidence", authorType: "agent" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(mockIssueService.addComment).not.toHaveBeenCalled();
   });
 
   it("allows an agent-authored in_review transition with a scheduled monitor", async () => {
