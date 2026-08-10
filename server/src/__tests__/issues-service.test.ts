@@ -496,7 +496,6 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
     const restoredExecutionState = {
       ...staleExecutionState,
       status: "pending",
-      lastDecisionOutcome: null,
     };
     const issue = await svc.create(companyId, {
       title: "Equal timestamp reconciliation race",

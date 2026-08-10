@@ -429,7 +429,7 @@ describe("issue execution policy transitions", () => {
       });
     });
 
-    it("executor re-submits after changes → returns to same review stage", () => {
+    it("executor re-submits after changes → returns to same review stage while preserving verdict history", () => {
       const result = applyIssueExecutionPolicyTransition({
         issue: {
           status: "in_progress",
@@ -463,11 +463,11 @@ describe("issue execution policy transitions", () => {
         currentStageType: "review",
         currentParticipant: { type: "agent", agentId: qaAgentId },
         lastDecisionId: null,
-        lastDecisionOutcome: null,
+        lastDecisionOutcome: "changes_requested",
       });
     });
 
-    it("explicit in_review restoration clears the stale changes-requested marker", () => {
+    it("explicit in_review restoration preserves the last changes-requested verdict", () => {
       const result = applyIssueExecutionPolicyTransition({
         issue: {
           status: "blocked",
@@ -501,7 +501,7 @@ describe("issue execution policy transitions", () => {
         currentParticipant: { type: "agent", agentId: qaAgentId },
         returnAssignee: { type: "agent", agentId: coderAgentId },
         lastDecisionId: "11111111-1111-4111-8111-111111111111",
-        lastDecisionOutcome: null,
+        lastDecisionOutcome: "changes_requested",
       });
     });
 
@@ -549,7 +549,7 @@ describe("issue execution policy transitions", () => {
         status: "pending",
         currentStageId: reviewStageId,
         currentParticipant: { type: "agent", agentId: qaAgentId },
-        lastDecisionOutcome: null,
+        lastDecisionOutcome: "changes_requested",
       });
     });
   });
