@@ -3385,6 +3385,7 @@ export function issueRoutes(
       parentId: string | null;
       assigneeAgentId: string | null;
       assigneeUserId: string | null;
+      executionState?: unknown;
       status: string;
     },
     action: "issue:comment" | "issue:read" | "issue:mutate",
@@ -3430,6 +3431,7 @@ export function issueRoutes(
       status: string;
       assigneeAgentId: string | null;
       assigneeUserId: string | null;
+      executionState?: unknown;
     },
   ) {
     if (req.actor.type !== "agent") return true;
@@ -3455,6 +3457,21 @@ export function issueRoutes(
     }
     const boundaryDecision = await decideIssueAccess(req, issue, "issue:comment");
     if (!boundaryDecision.allowed) {
+      // During a governed execution stage, the configured participant is the
+      // authorized evidence author even when workflow assignment still points
+      // at the implementation return assignee. Keep this exception narrow:
+      // company/resource access was already established by getAccessibleResource,
+      // and only the typed active execution participant may use it.
+      const executionState = parseIssueExecutionState(issue.executionState);
+      if (
+        executionState?.status === "pending" &&
+        actorMatchesExecutionParticipant(
+          { actorType: "agent", actorId: actorAgentId },
+          executionState.currentParticipant,
+        )
+      ) {
+        return true;
+      }
       res.status(403).json({ error: "Issue is outside this actor's authorization boundary" });
       return false;
     }

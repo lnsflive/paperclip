@@ -1381,7 +1381,7 @@ describe("issue execution policy transitions", () => {
       const result = applyIssueExecutionPolicyTransition({
         issue: {
           status: "in_progress",
-          assigneeAgentId: coderAgentId,
+          assigneeAgentId: qaAgentId,
           assigneeUserId: null,
           executionPolicy: policy,
           executionState: {
@@ -1389,10 +1389,10 @@ describe("issue execution policy transitions", () => {
             currentStageId: stageId,
             currentStageIndex: 0,
             currentStageType: "review",
-            currentParticipant: { type: "agent", agentId: coderAgentId },
-            returnAssignee: { type: "agent", agentId: coderAgentId },
+            currentParticipant: { type: "agent", agentId: qaAgentId },
+            returnAssignee: { type: "agent", agentId: qaAgentId },
             completedStageIds: [],
-            lastDecisionId: "decision-1",
+            lastDecisionId: "b6743115-ddef-4215-af3c-b903f4b1864b",
             lastDecisionOutcome: "changes_requested",
           },
         },
@@ -1404,13 +1404,13 @@ describe("issue execution policy transitions", () => {
 
       expect(result.patch).toMatchObject({
         status: "in_review",
-        assigneeAgentId: coderAgentId,
+        assigneeAgentId: qaAgentId,
         executionState: {
           status: "pending",
           currentStageId: stageId,
-          currentParticipant: { type: "agent", agentId: coderAgentId },
-          returnAssignee: { type: "agent", agentId: coderAgentId },
-          lastDecisionId: "decision-1",
+          currentParticipant: { type: "agent", agentId: qaAgentId },
+          returnAssignee: { type: "agent", agentId: qaAgentId },
+          lastDecisionId: "b6743115-ddef-4215-af3c-b903f4b1864b",
           lastDecisionOutcome: "changes_requested",
         },
       });
