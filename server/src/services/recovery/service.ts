@@ -75,7 +75,7 @@ import {
 } from "./model-profile-hint.js";
 import { isAutomaticRecoverySuppressedByPauseHold } from "./pause-hold-guard.js";
 
-const EXECUTION_PATH_HEARTBEAT_RUN_STATUSES = ["queued", "running", "scheduled_retry"] as const;
+const EXECUTION_PATH_HEARTBEAT_RUN_STATUSES = ["queued", "running", "scheduled_retry", "paused"] as const;
 
 export type OrphanExecutionTerminalizationInput = {
   companyId: string;
@@ -105,8 +105,10 @@ export async function terminalizeOrphanExecutionProjection(
       .then((rows) => rows[0] ?? null);
     if (!issue || issue.identifier !== "ECO-1077" || issue.status !== "done") return null;
 
-    const currentState = issue.executionState ?? null;
-    if (JSON.stringify(currentState) !== JSON.stringify(input.expectedExecutionState)) return null;
+    const currentState = parseIssueExecutionState(issue.executionState);
+    const expectedState = parseIssueExecutionState(input.expectedExecutionState);
+    if (!currentState || !expectedState || JSON.stringify(currentState) !== JSON.stringify(expectedState)) return null;
+    if (currentState.status !== "completed" || currentState.currentStageId !== null || currentState.currentParticipant !== null) return null;
     const recovery = await tx
       .select()
       .from(issueRecoveryActions)
@@ -132,17 +134,10 @@ export async function terminalizeOrphanExecutionProjection(
     if (liveRuns.length > 0) return null;
 
     const after = {
-      ...((currentState && typeof currentState === "object") ? currentState : {}),
-      status: "terminal",
+      ...currentState,
+      status: "completed" as const,
       currentStageId: null,
       currentParticipant: null,
-      terminalizedOrphan: {
-        actor: input.actor,
-        reason: input.reason,
-        evidencePointers: input.evidencePointers,
-        recoveryActionId: recovery.id,
-        before: currentState,
-      },
     };
     const updated = await tx.update(issues).set({ executionState: after, updatedAt: new Date() })
       .where(and(eq(issues.id, issue.id), eq(issues.status, "done"), eq(issues.executionState, currentState)))
