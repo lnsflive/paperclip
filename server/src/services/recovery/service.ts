@@ -76,6 +76,7 @@ import {
 import { isAutomaticRecoverySuppressedByPauseHold } from "./pause-hold-guard.js";
 
 const EXECUTION_PATH_HEARTBEAT_RUN_STATUSES = ["queued", "running", "scheduled_retry", "paused"] as const;
+const ORPHAN_TERMINALIZATION_SUBJECT_ID = "dfd6e459-b3d0-40bb-8d02-014fcb2f125f";
 
 export type OrphanExecutionTerminalizationInput = {
   companyId: string;
@@ -97,13 +98,16 @@ export async function terminalizeOrphanExecutionProjection(
   input: OrphanExecutionTerminalizationInput,
 ) {
   return db.transaction(async (tx) => {
+    // Serialize this administrative CAS with run creation. The issue row lock
+    // alone does not prevent a legacy taskId-associated run from appearing.
+    await tx.execute(sql`set transaction isolation level serializable`);
     const issue = await tx
       .select()
       .from(issues)
       .where(and(eq(issues.id, input.issueId), eq(issues.companyId, input.companyId)))
       .for("update")
       .then((rows) => rows[0] ?? null);
-    if (!issue || issue.identifier !== "ECO-1077" || issue.status !== "done") return null;
+    if (!issue || issue.id !== ORPHAN_TERMINALIZATION_SUBJECT_ID || issue.identifier !== "ECO-1077" || issue.status !== "done") return null;
 
     const currentState = parseIssueExecutionState(issue.executionState);
     const expectedState = parseIssueExecutionState(input.expectedExecutionState);
@@ -127,7 +131,7 @@ export async function terminalizeOrphanExecutionProjection(
       .from(heartbeatRuns)
       .where(and(
         eq(heartbeatRuns.companyId, input.companyId),
-        sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issue.id}`,
+        sql`(${heartbeatRuns.contextSnapshot}->>'issueId' = ${issue.id} OR ${heartbeatRuns.contextSnapshot}->>'taskId' = ${issue.id})`,
         inArray(heartbeatRuns.status, EXECUTION_PATH_HEARTBEAT_RUN_STATUSES),
       ))
       .limit(1);
@@ -140,7 +144,7 @@ export async function terminalizeOrphanExecutionProjection(
       currentParticipant: null,
     };
     const updated = await tx.update(issues).set({ executionState: after, updatedAt: new Date() })
-      .where(and(eq(issues.id, issue.id), eq(issues.status, "done"), eq(issues.executionState, currentState)))
+      .where(and(eq(issues.id, issue.id), eq(issues.status, "done"), eq(issues.executionState, currentState as Record<string, unknown>)))
       .returning();
     if (updated.length !== 1) return null;
     await tx.insert(activityLog).values({

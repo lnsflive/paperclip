@@ -5715,9 +5715,16 @@ export function issueRoutes(
       issueId: issue.id,
       recoveryActionId: body.recoveryActionId,
       reason: body.reason,
-      evidencePointers: body.evidencePointers.filter((value): value is string => typeof value === "string"),
+      evidencePointers: body.evidencePointers as string[],
       expectedExecutionState: body.expectedExecutionState as Record<string, unknown>,
-      actor: { type: req.actor.type, id: req.actor.id, agentId: req.actor.agentId ?? null, runId: req.actor.runId ?? null },
+      actor: {
+        type: req.actor.type === "agent" ? "agent" : "board",
+        id: req.actor.type === "agent"
+          ? (req.actor.agentId ?? req.actor.keyId ?? "unknown-agent")
+          : (req.actor.userId ?? req.actor.source ?? "board"),
+        agentId: req.actor.agentId ?? null,
+        runId: req.actor.runId ?? null,
+      },
     });
     if (!result) return res.status(409).json({ error: "Orphan execution CAS preconditions did not match; no mutation performed" });
     return res.json({ issue: result });
