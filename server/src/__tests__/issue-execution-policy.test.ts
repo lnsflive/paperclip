@@ -1214,12 +1214,13 @@ describe("issue execution policy transitions", () => {
 
     it("routes the preserved ECO-1174 security approval shape to Lead Engineer", () => {
       const appSecurityAgentId = "c5818483-432d-4343-84bc-f9d20f7c8348";
-      const leadEngineerAgentId = "bb02dbe0-a6fb-4c86-b922-8b8bfcd428ae";
-      const implementationAgentId = coderAgentId;
+      const leadEngineerStageId = "bb02dbe0-a6fb-4c86-b922-8b8bfcd428ae";
+      const leadEngineerAgentId = "7e13ec36-3d98-4faf-9748-c705aaec4282";
       const policy = makePolicy([
         { type: "review", participants: [{ type: "agent", agentId: appSecurityAgentId }] },
         { type: "review", participants: [{ type: "agent", agentId: leadEngineerAgentId }] },
       ]);
+      policy.stages[1] = { ...policy.stages[1], id: leadEngineerStageId };
 
       const result = applyIssueExecutionPolicyTransition({
         issue: {
@@ -1233,7 +1234,7 @@ describe("issue execution policy transitions", () => {
             currentStageIndex: 0,
             currentStageType: "review",
             currentParticipant: { type: "agent", agentId: appSecurityAgentId },
-            returnAssignee: { type: "agent", agentId: implementationAgentId },
+            returnAssignee: { type: "agent", agentId: leadEngineerAgentId },
             completedStageIds: [],
             lastDecisionId: null,
             lastDecisionOutcome: "changes_requested",
@@ -1252,11 +1253,11 @@ describe("issue execution policy transitions", () => {
         assigneeUserId: null,
         executionState: {
           status: "pending",
-          currentStageId: policy.stages[1].id,
+          currentStageId: leadEngineerStageId,
           currentStageIndex: 1,
           currentStageType: "review",
           currentParticipant: { type: "agent", agentId: leadEngineerAgentId },
-          returnAssignee: { type: "agent", agentId: implementationAgentId },
+          returnAssignee: { type: "agent", agentId: leadEngineerAgentId },
           completedStageIds: [policy.stages[0].id],
           lastDecisionOutcome: "approved",
         },
