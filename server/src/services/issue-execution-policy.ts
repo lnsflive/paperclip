@@ -557,7 +557,7 @@ function buildPendingState(input: {
     reviewRequest: input.reviewRequest ?? null,
     completedStageIds: input.previous?.completedStageIds ?? [],
     lastDecisionId: input.previous?.lastDecisionId ?? null,
-    lastDecisionOutcome: input.previous?.lastDecisionOutcome ?? null,
+    lastDecisionOutcome: input.previous?.status === CHANGES_REQUESTED_STATUS ? null : input.previous?.lastDecisionOutcome ?? null,
     monitor: input.previous?.monitor ?? null,
   };
 }

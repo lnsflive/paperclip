@@ -7941,6 +7941,15 @@ export function issueRoutes(
               actorUserId: actor.actorType === "user" ? actor.actorId : null,
             },
             tx,
+            {
+              expectedUpdatedAt: existing.updatedAt,
+              expectedRoutingState: {
+                status: existing.status,
+                assigneeAgentId: existing.assigneeAgentId,
+                assigneeUserId: existing.assigneeUserId,
+                executionState: existing.executionState,
+              },
+            },
           );
           if (!updated) return null;
 
@@ -7964,6 +7973,14 @@ export function issueRoutes(
           ...updateFields,
           actorAgentId: actor.agentId ?? null,
           actorUserId: actor.actorType === "user" ? actor.actorId : null,
+        }, undefined, {
+          expectedUpdatedAt: existing.updatedAt,
+          expectedRoutingState: {
+            status: existing.status,
+            assigneeAgentId: existing.assigneeAgentId,
+            assigneeUserId: existing.assigneeUserId,
+            executionState: existing.executionState,
+          },
         });
       }
     } catch (err) {
@@ -9914,10 +9931,18 @@ export function issueRoutes(
             commentOptions,
             tx,
           );
-          const updated = await svc.update(id, updatePatch, tx);
+          const updated = await svc.update(id, updatePatch, tx, {
+            expectedUpdatedAt: currentIssue.updatedAt,
+            expectedRoutingState: {
+              status: currentIssue.status,
+              assigneeAgentId: currentIssue.assigneeAgentId,
+              assigneeUserId: currentIssue.assigneeUserId,
+              executionState: currentIssue.executionState,
+            },
+          });
+          if (!updated) throw new AutoApprovalIssueMissingError();
           // Throw (not return null) so drizzle rolls back the inserted comment when the issue
           // has been concurrently deleted between the initial fetch and the in-transaction update.
-          if (!updated) throw new AutoApprovalIssueMissingError();
 
           if (transition.decision && decisionId) {
             await tx.insert(issueExecutionDecisions).values({

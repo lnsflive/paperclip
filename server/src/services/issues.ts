@@ -6473,6 +6473,15 @@ export function issueService(db: Db) {
         actorUserId?: string | null;
       },
       dbOrTx: any = db,
+      options?: {
+        expectedUpdatedAt?: Date | string | null;
+        expectedRoutingState?: {
+          status?: string | null;
+          assigneeAgentId?: string | null;
+          assigneeUserId?: string | null;
+          executionState?: typeof issues.$inferSelect["executionState"];
+        };
+      },
     ) => {
       const existing = await dbOrTx
         .select()
@@ -6635,10 +6644,48 @@ export function issueService(db: Db) {
         const updated = await tx
           .update(issues)
           .set(patch)
-          .where(eq(issues.id, id))
+          .where(and(
+            eq(issues.id, id),
+            options?.expectedUpdatedAt
+              ? eq(issues.updatedAt, new Date(options.expectedUpdatedAt))
+              : sql`true`,
+            options?.expectedRoutingState?.status !== undefined
+              ? eq(issues.status, options.expectedRoutingState.status ?? existing.status)
+              : sql`true`,
+            options?.expectedRoutingState?.assigneeAgentId !== undefined
+              ? options.expectedRoutingState.assigneeAgentId === null
+                ? isNull(issues.assigneeAgentId)
+                : eq(issues.assigneeAgentId, options.expectedRoutingState.assigneeAgentId)
+              : sql`true`,
+            options?.expectedRoutingState?.assigneeUserId !== undefined
+              ? options.expectedRoutingState.assigneeUserId === null
+                ? isNull(issues.assigneeUserId)
+                : eq(issues.assigneeUserId, options.expectedRoutingState.assigneeUserId)
+              : sql`true`,
+            options?.expectedRoutingState?.executionState !== undefined
+              ? options.expectedRoutingState.executionState === null
+                ? isNull(issues.executionState)
+                : eq(issues.executionState, options.expectedRoutingState.executionState)
+              : sql`true`,
+          ))
           .returning()
           .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
-        if (!updated) return null;
+        if (!updated) {
+          if (options?.expectedUpdatedAt) {
+            const current = await tx
+              .select({ id: issues.id })
+              .from(issues)
+              .where(eq(issues.id, id))
+              .then((rows: Array<{ id: string }>) => rows[0] ?? null);
+            if (current) {
+              throw conflict("Issue update conflict", {
+                issueId: id,
+                reason: "stale_snapshot",
+              });
+            }
+          }
+          return null;
+        }
         if (
           (updated.status === "done" || updated.status === "cancelled") &&
           existing.status !== updated.status

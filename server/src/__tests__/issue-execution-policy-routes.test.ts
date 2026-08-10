@@ -291,10 +291,17 @@ describe("issue execution policy routes", () => {
       .send({ status: "in_review" });
 
     expect(res.status).toBe(200);
-    expect(mockIssueService.update).toHaveBeenCalledWith(
-      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-      expect.objectContaining({ status: "in_review" }),
-    );
+    expect(mockIssueService.update.mock.calls[0]?.[0]).toBe("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    expect(mockIssueService.update.mock.calls[0]?.[1]).toEqual(expect.objectContaining({ status: "in_review" }));
+    expect(mockIssueService.update.mock.calls[0]?.[3]).toEqual({
+      expectedUpdatedAt: issue.updatedAt,
+      expectedRoutingState: {
+        status: issue.status,
+        assigneeAgentId: issue.assigneeAgentId,
+        assigneeUserId: issue.assigneeUserId,
+        executionState: issue.executionState,
+      },
+    });
   });
 
   it("allows an agent-authored in_review transition with a typed execution participant", async () => {
@@ -336,19 +343,25 @@ describe("issue execution policy routes", () => {
       .send({ status: "in_review", executionPolicy: policy });
 
     expect(res.status).toBe(200);
-    expect(mockIssueService.update).toHaveBeenCalledWith(
-      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-      expect.objectContaining({
-        status: "in_review",
-        executionState: expect.objectContaining({
-          status: "pending",
-          currentParticipant: expect.objectContaining({
-            type: "agent",
-            agentId: "44444444-4444-4444-8444-444444444444",
-          }),
+    expect(mockIssueService.update.mock.calls[0]?.[1]).toEqual(expect.objectContaining({
+      status: "in_review",
+      executionState: expect.objectContaining({
+        status: "pending",
+        currentParticipant: expect.objectContaining({
+          type: "agent",
+          agentId: "44444444-4444-4444-8444-444444444444",
         }),
       }),
-    );
+    }));
+    expect(mockIssueService.update.mock.calls[0]?.[3]).toEqual({
+      expectedUpdatedAt: issue.updatedAt,
+      expectedRoutingState: {
+        status: issue.status,
+        assigneeAgentId: issue.assigneeAgentId,
+        assigneeUserId: issue.assigneeUserId,
+        executionState: issue.executionState,
+      },
+    });
   });
 
   it("allows an agent-authored in_review transition with a scheduled monitor", async () => {
@@ -395,13 +408,19 @@ describe("issue execution policy routes", () => {
       });
 
     expect(res.status).toBe(200);
-    expect(mockIssueService.update).toHaveBeenCalledWith(
-      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-      expect.objectContaining({
-        status: "in_review",
-        monitorNextCheckAt: new Date("2026-12-01T12:00:00.000Z"),
-      }),
-    );
+    expect(mockIssueService.update.mock.calls[0]?.[1]).toEqual(expect.objectContaining({
+      status: "in_review",
+      monitorNextCheckAt: new Date("2026-12-01T12:00:00.000Z"),
+    }));
+    expect(mockIssueService.update.mock.calls[0]?.[3]).toEqual({
+      expectedUpdatedAt: issue.updatedAt,
+      expectedRoutingState: {
+        status: issue.status,
+        assigneeAgentId: issue.assigneeAgentId,
+        assigneeUserId: issue.assigneeUserId,
+        executionState: issue.executionState,
+      },
+    });
   });
 
   it("allows board-authored in_review repair updates without a review path", async () => {
@@ -431,6 +450,15 @@ describe("issue execution policy routes", () => {
     expect(res.status).toBe(200);
     expect(mockIssueThreadInteractionService.listForIssue).not.toHaveBeenCalled();
     expect(mockIssueApprovalService.listApprovalsForIssue).not.toHaveBeenCalled();
+    expect(mockIssueService.update.mock.calls[0]?.[3]).toEqual({
+      expectedUpdatedAt: issue.updatedAt,
+      expectedRoutingState: {
+        status: issue.status,
+        assigneeAgentId: issue.assigneeAgentId,
+        assigneeUserId: issue.assigneeUserId,
+        executionState: issue.executionState,
+      },
+    });
   });
 
   it("does not auto-start execution review when reviewers are added to an already in_review issue", async () => {
@@ -467,14 +495,20 @@ describe("issue execution policy routes", () => {
       .send({ executionPolicy: policy });
 
     expect(res.status).toBe(200);
-    expect(mockIssueService.update).toHaveBeenCalledWith(
-      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-      expect.objectContaining({
-        executionPolicy: policy,
-        actorAgentId: null,
-        actorUserId: "local-board",
-      }),
-    );
+    expect(mockIssueService.update.mock.calls[0]?.[1]).toEqual(expect.objectContaining({
+      executionPolicy: policy,
+      actorAgentId: null,
+      actorUserId: "local-board",
+    }));
+    expect(mockIssueService.update.mock.calls[0]?.[3]).toEqual({
+      expectedUpdatedAt: issue.updatedAt,
+      expectedRoutingState: {
+        status: issue.status,
+        assigneeAgentId: issue.assigneeAgentId,
+        assigneeUserId: issue.assigneeUserId,
+        executionState: issue.executionState,
+      },
+    });
     const updatePatch = mockIssueService.update.mock.calls[0]?.[1] as Record<string, unknown>;
     expect(updatePatch.status).toBeUndefined();
     expect(updatePatch.assigneeAgentId).toBeUndefined();
