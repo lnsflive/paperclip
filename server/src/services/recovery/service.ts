@@ -1,4 +1,5 @@
-import { and, asc, desc, eq, gt, gte, inArray, isNull, notInArray, or, sql, alias } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, isNull, notInArray, or, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "@paperclipai/db";
 import {
   DEFAULT_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
@@ -3461,6 +3462,8 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           eq(issueRelations.companyId, issue.companyId),
           eq(issueRelations.relatedIssueId, issue.id),
           eq(issueRelations.type, "blocks"),
+          eq(issues.companyId, issue.companyId),
+          sql.raw(visibleIssueSql("issues")),
           notInArray(issues.status, ["done", "cancelled"]),
         ),
       )
@@ -4803,28 +4806,28 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     // Reconcile findings are advisory snapshots. Revalidate the exact source
     // and leaf blocker at the mutation boundary so a concurrent resolution or
     // status transition cannot create a recovery from stale candidate state.
-    const sourceSnapshot = input.finding.dependencyPath[0];
-    const leafSnapshot = input.finding.dependencyPath[input.finding.dependencyPath.length - 1];
-    if (
-      !sourceSnapshot ||
-      !leafSnapshot ||
-      issue.status !== sourceSnapshot.status ||
-      !(await db
+    const dependencyPath = input.finding.dependencyPath;
+    const sourceSnapshot = dependencyPath[0];
+    if (!sourceSnapshot || issue.status !== sourceSnapshot.status) return { kind: "skipped" as const };
+    for (let index = 1; index < dependencyPath.length; index += 1) {
+      const parent = dependencyPath[index - 1];
+      const child = dependencyPath[index];
+      const edge = await db
         .select({ id: issueRelations.issueId })
         .from(issueRelations)
         .innerJoin(issues, eq(issueRelations.issueId, issues.id))
         .where(and(
           eq(issueRelations.companyId, issue.companyId),
           eq(issueRelations.type, "blocks"),
-          eq(issueRelations.relatedIssueId, issue.id),
-          eq(issueRelations.issueId, leafSnapshot.issueId),
+          eq(issueRelations.relatedIssueId, parent.issueId),
+          eq(issueRelations.issueId, child.issueId),
           eq(issues.companyId, issue.companyId),
-          eq(issues.status, leafSnapshot.status),
+          eq(issues.status, child.status),
           sql.raw(visibleIssueSql("issues")),
         ))
-        .limit(1)
-        .then((rows) => rows.length > 0))
-    ) return { kind: "skipped" as const };
+        .limit(1);
+      if (edge.length === 0) return { kind: "skipped" as const };
+    }
     if (await isAutomaticRecoverySuppressedByPauseHold(db, issue.companyId, issue.id, treeControlSvc)) {
       return { kind: "skipped" as const };
     }
