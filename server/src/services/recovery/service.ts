@@ -4844,7 +4844,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     return updated;
   }
 
-  async function createIssueGraphLivenessEscalation(input: {
+  async function createIssueGraphLivenessEscalationUnlocked(input: {
     finding: IssueLivenessFinding;
     runId?: string | null;
     now: Date;
@@ -5043,6 +5043,18 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     }, "created issue graph liveness escalation");
 
     return { kind: "created" as const, escalationIssueId: escalation.id };
+  }
+
+  // Keep source revalidation, uniqueness checks, first-blocker creation, and
+  // ownership handoff as one logical mutation when the sweep and terminal
+  // callback reconcile the same source concurrently.
+  async function createIssueGraphLivenessEscalation(
+    input: Parameters<typeof createIssueGraphLivenessEscalationUnlocked>[0],
+  ) {
+    return withStrandedRecoveryMutationLock(
+      `${input.finding.companyId}:${input.finding.issueId}`,
+      () => createIssueGraphLivenessEscalationUnlocked(input),
+    );
   }
 
   async function reconcileResolvedDependencyWakeBackstop(opts?: ResolvedDependencyWakeBackstopOptions) {
