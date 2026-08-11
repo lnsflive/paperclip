@@ -9932,7 +9932,10 @@ export function issueRoutes(
             tx,
           );
           const updated = await svc.update(id, updatePatch, tx, {
-            expectedUpdatedAt: currentIssue.updatedAt,
+            // addComment updates issues.updatedAt inside this same transaction. The
+            // routing-state predicate remains the compare-and-set guard here; using
+            // the pre-comment timestamp would reject every valid approval as stale.
+            expectedUpdatedAt: undefined,
             expectedRoutingState: {
               status: currentIssue.status,
               assigneeAgentId: currentIssue.assigneeAgentId,
