@@ -3160,6 +3160,26 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       });
     }
 
+    // The liveness scan intentionally works from a snapshot. Revalidate at the
+    // mutation boundary as a blocker resolution can race a later reconciliation
+    // after the prior source-scoped action was resolved. In that case the stale
+    // cancelled dependency-wait run must not recreate recovery or rotate the
+    // source owner.
+    const currentIssue = await db
+      .select()
+      .from(issues)
+      .where(and(eq(issues.companyId, input.issue.companyId), eq(issues.id, input.issue.id)))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+    if (!currentIssue || ["done", "cancelled"].includes(currentIssue.status)) return null;
+    const currentLatestRun = await getLatestIssueRun(currentIssue.companyId, currentIssue.id);
+    if (
+      currentLatestRun?.errorCode === "issue_dependencies_blocked" &&
+      await hasUnresolvedFirstClassBlocker(currentIssue)
+    ) {
+      return null;
+    }
+
     const recoveryCause = resolveStrandedRecoveryCause(input.latestRun, input.recoveryCause);
     const recoveryAction = await ensureSourceScopedStrandedRecoveryAction({
       issue: input.issue,
