@@ -507,6 +507,22 @@ This is an active-work continuity recovery.
 
 The same bounded rule applies when the previous heartbeat reported waiting on a local/background watcher and that watcher was killed, disappeared, or was never represented by a durable Paperclip primitive. Paperclip queues at most one continuation for the same recovery fingerprint. If the continuation also leaves only local watcher evidence, Paperclip must surface a real blocker or explicit recovery action instead of repeating continuation recovery. A new monitor, scheduled wake, healthy delegated blocker issue, or other durable source mutation resolves that recovery fingerprint normally.
 
+An intentionally dependency-blocked source is not stranded merely because its latest
+run was cancelled while reporting that dependency wait, or because a stale run
+summary still says `in_progress`. When the source has an unresolved first-class
+blocker and that blocker chain supplies the waiting path, liveness reconciliation
+must preserve the source's `blocked` state and must not create, recreate, or rotate
+ownership into a stranded-work recovery action. This decision is source-state
+based, not run-summary based: repeated or concurrent reconciliation must revalidate
+the current blocker edge and source status as part of the recovery mutation so an
+older cancellation cannot win a race with the durable dependency wait.
+
+This suppression applies only to the covered dependency wait. If the unresolved
+blocker leaf itself has no live or explicit waiting path, the chain is stalled and
+the normal blocked-issue recovery/escalation rules still apply. A source that is
+`todo`, `in_progress`, or `in_review` without a valid dependency wait remains
+eligible for the bounded stranded-work rules above.
+
 #### Deliberate wait is not a lost run
 
 A continuation that the staleness gate cancelled with `issue_continuation_waiting_on_review` is a *deliberate park*, not a disappeared execution path. The latest run reported that the issue is waiting for review/approval (for example, an umbrella issue whose work was just decomposed into sub-tasks). Treating that park as a stranded run would retry it, then escalate it to `blocked` with a recovery action and an operator-facing failure notice — even though nothing failed and there is nothing for a human to do.
