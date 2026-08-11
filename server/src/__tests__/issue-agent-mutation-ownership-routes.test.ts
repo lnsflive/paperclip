@@ -1397,6 +1397,8 @@ describe("agent issue mutation checkout ownership", () => {
       expect.objectContaining({
         assigneeAdapterOverrides: { modelProfile: "cheap" },
       }),
+      undefined,
+      expect.objectContaining({ expectedRoutingState: expect.any(Object) }),
     );
   });
 
@@ -1430,6 +1432,8 @@ describe("agent issue mutation checkout ownership", () => {
     expect(mockIssueService.update).toHaveBeenCalledWith(
       issueId,
       expect.objectContaining({ title: "Updated after commit" }),
+      undefined,
+      expect.objectContaining({ expectedRoutingState: expect.any(Object) }),
     );
     expect(mockIssueService.addComment).toHaveBeenCalledWith(
       issueId,
@@ -1770,7 +1774,12 @@ describe("agent issue mutation checkout ownership", () => {
       const res = await request(app).patch(`/api/issues/${issueId}`).send({ status });
 
       expect(res.status, JSON.stringify(res.body)).toBe(200);
-      expect(mockIssueService.update).toHaveBeenCalledWith(issueId, expect.objectContaining({ status }));
+      expect(mockIssueService.update).toHaveBeenCalledWith(
+        issueId,
+        expect.objectContaining({ status }),
+        undefined,
+        expect.objectContaining({ expectedRoutingState: expect.any(Object) }),
+      );
     });
 
     it("lets a watchdog run transition a watched issue to in_review with a live review path", async () => {
@@ -1788,7 +1797,12 @@ describe("agent issue mutation checkout ownership", () => {
       const res = await request(app).patch(`/api/issues/${issueId}`).send({ status: "in_review" });
 
       expect(res.status, JSON.stringify(res.body)).toBe(200);
-      expect(mockIssueService.update).toHaveBeenCalledWith(issueId, expect.objectContaining({ status: "in_review" }));
+      expect(mockIssueService.update).toHaveBeenCalledWith(
+        issueId,
+        expect.objectContaining({ status: "in_review" }),
+        undefined,
+        expect.objectContaining({ expectedRoutingState: expect.any(Object) }),
+      );
     });
 
     it("rejects stale watchdog source mutations when revalidation finds a live path", async () => {
@@ -1951,6 +1965,8 @@ describe("agent issue mutation checkout ownership", () => {
       expect(mockIssueService.update).toHaveBeenCalledWith(
         issueId,
         expect.objectContaining({ assigneeAgentId: peerAgentId }),
+        undefined,
+        expect.objectContaining({ expectedRoutingState: expect.any(Object) }),
       );
     });
 
