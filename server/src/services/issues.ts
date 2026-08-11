@@ -141,6 +141,15 @@ const ISSUE_CREATE_IDEMPOTENCY_KEY_CLEANUP_BATCH_SIZE = 500;
 const DELETED_ISSUE_COMMENT_BODY = "";
 const ISSUE_WAKE_DIAGNOSTICS_ACTIVITY_ACTIONS = ["issue.tree_hold_wakeup_deferred"] as const;
 
+/** Serialize dependency changes with recovery decisions across processes. */
+export async function lockIssueDependencyMutation(
+  dbOrTx: { execute: (query: SQL) => Promise<unknown> },
+  companyId: string,
+  issueId: string,
+) {
+  await dbOrTx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`${companyId}:${issueId}`}, 0))`);
+}
+
 function wakeRequestTargetsIssue(issueId: string) {
   return sql`(
     ${agentWakeupRequests.payload} ->> 'issueId' = ${issueId}
@@ -4408,6 +4417,7 @@ export function issueService(db: Db) {
     actor: { agentId?: string | null; userId?: string | null } = {},
     dbOrTx: any = db,
   ) {
+    await lockIssueDependencyMutation(dbOrTx, companyId, issueId);
     const deduped = [...new Set(blockedByIssueIds)];
     if (deduped.some((candidate) => candidate === issueId)) {
       throw unprocessable("Issue cannot be blocked by itself");

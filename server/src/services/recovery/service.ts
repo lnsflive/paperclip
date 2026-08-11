@@ -39,7 +39,7 @@ import { budgetService } from "../budgets.js";
 import { instanceSettingsService } from "../instance-settings.js";
 import { issueRecoveryActionService } from "../issue-recovery-actions.js";
 import { issueTreeControlService } from "../issue-tree-control.js";
-import { TERMINAL_HEARTBEAT_RUN_STATUSES, issueService } from "../issues.js";
+import { lockIssueDependencyMutation, TERMINAL_HEARTBEAT_RUN_STATUSES, issueService } from "../issues.js";
 import {
   applyIssueMonitorPolicyTransition,
   normalizeIssueExecutionPolicy,
@@ -3372,7 +3372,10 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
   async function escalateStrandedAssignedIssue(input: Parameters<typeof escalateStrandedAssignedIssueUnlocked>[0]) {
     return withStrandedRecoveryMutationLock(
       `${input.issue.companyId}:${input.issue.id}`,
-      () => escalateStrandedAssignedIssueUnlocked(input),
+      () => db.transaction(async (tx) => {
+        await lockIssueDependencyMutation(tx, input.issue.companyId, input.issue.id);
+        return escalateStrandedAssignedIssueUnlocked(input);
+      }),
     );
   }
 
