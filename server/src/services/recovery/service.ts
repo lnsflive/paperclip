@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, gte, inArray, isNull, notInArray, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, isNull, notInArray, or, sql, alias } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   DEFAULT_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
@@ -27,7 +27,7 @@ import {
 } from "@paperclipai/db";
 import { parseObject, asBoolean, asNumber } from "../../adapters/utils.js";
 import { runningProcesses } from "../../adapters/index.js";
-import { visibleIssueCondition } from "../issue-visibility.js";
+import { visibleIssueCondition, visibleIssueSql } from "../issue-visibility.js";
 import { forbidden, notFound } from "../../errors.js";
 import { logger } from "../../middleware/logger.js";
 import { isPidAlive, isProcessGroupAlive, terminateLocalService } from "../local-service-supervisor.js";
@@ -4169,6 +4169,8 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         ),
       ));
 
+    const blockerIssues = alias(issues, "liveness_blocker_issue");
+    const blockedIssues = alias(issues, "liveness_blocked_issue");
     const [
       issueRows,
       relationRows,
@@ -4189,7 +4191,15 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           blockedIssueId: issueRelations.relatedIssueId,
         })
         .from(issueRelations)
-        .where(eq(issueRelations.type, "blocks")),
+        .innerJoin(blockerIssues, eq(issueRelations.issueId, blockerIssues.id))
+        .innerJoin(blockedIssues, eq(issueRelations.relatedIssueId, blockedIssues.id))
+        .where(and(
+          eq(issueRelations.type, "blocks"),
+          eq(issueRelations.companyId, blockerIssues.companyId),
+          eq(issueRelations.companyId, blockedIssues.companyId),
+          sql.raw(visibleIssueSql("liveness_blocker_issue")),
+          sql.raw(visibleIssueSql("liveness_blocked_issue")),
+        )),
       db
         .select({
           id: agents.id,
@@ -4221,7 +4231,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         .innerJoin(heartbeatRuns, eq(issues.executionRunId, heartbeatRuns.id))
         .where(
           and(
-            visibleIssueCondition(),
+            sql.raw(visibleIssueSql("issues")),
             notInArray(issues.originKind, [RECOVERY_ORIGIN_KINDS.issueGraphLivenessEscalation]),
             inArray(heartbeatRuns.status, [...EXECUTION_PATH_HEARTBEAT_RUN_STATUSES]),
           ),
@@ -4787,9 +4797,34 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     const issue = await db
       .select()
       .from(issues)
-      .where(eq(issues.id, input.finding.issueId))
+      .where(and(eq(issues.id, input.finding.issueId), eq(issues.companyId, input.finding.companyId), visibleIssueCondition()))
       .then((rows) => rows[0] ?? null);
     if (!issue || issue.companyId !== input.finding.companyId) return { kind: "skipped" as const };
+    // Reconcile findings are advisory snapshots. Revalidate the exact source
+    // and leaf blocker at the mutation boundary so a concurrent resolution or
+    // status transition cannot create a recovery from stale candidate state.
+    const sourceSnapshot = input.finding.dependencyPath[0];
+    const leafSnapshot = input.finding.dependencyPath[input.finding.dependencyPath.length - 1];
+    if (
+      !sourceSnapshot ||
+      !leafSnapshot ||
+      issue.status !== sourceSnapshot.status ||
+      !(await db
+        .select({ id: issueRelations.issueId })
+        .from(issueRelations)
+        .innerJoin(issues, eq(issueRelations.issueId, issues.id))
+        .where(and(
+          eq(issueRelations.companyId, issue.companyId),
+          eq(issueRelations.type, "blocks"),
+          eq(issueRelations.relatedIssueId, issue.id),
+          eq(issueRelations.issueId, leafSnapshot.issueId),
+          eq(issues.companyId, issue.companyId),
+          eq(issues.status, leafSnapshot.status),
+          sql.raw(visibleIssueSql("issues")),
+        ))
+        .limit(1)
+        .then((rows) => rows.length > 0))
+    ) return { kind: "skipped" as const };
     if (await isAutomaticRecoverySuppressedByPauseHold(db, issue.companyId, issue.id, treeControlSvc)) {
       return { kind: "skipped" as const };
     }
