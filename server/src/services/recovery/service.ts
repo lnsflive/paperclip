@@ -3170,7 +3170,9 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     recoveryCause?: StrandedRecoveryCause;
     recoveryOwnerAgentId?: string | null;
     successfulRunHandoffEvidence?: SuccessfulRunHandoffRecoveryEvidence | null;
+    mutationDb?: any;
   }) {
+    const mutationIssuesSvc = issueService(input.mutationDb ?? db);
     if (isStrandedIssueRecoveryIssue(input.issue)) {
       return escalateStrandedRecoveryIssueInPlace({
         issue: input.issue,
@@ -3220,7 +3222,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       });
     }
     const blockerIds = await existingUnresolvedBlockerIssueIds(input.issue.companyId, input.issue.id);
-    const updated = await issuesSvc.update(input.issue.id, {
+    const updated = await mutationIssuesSvc.update(input.issue.id, {
       status: "blocked",
       blockedByIssueIds: blockerIds,
       assigneeAgentId: recoveryAction.ownerAgentId ?? input.issue.assigneeAgentId,
@@ -3357,7 +3359,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         (currentIssue.status !== "blocked" ||
           currentIssue.assigneeAgentId !== recoveryAction.ownerAgentId)
       ) {
-        const reblocked = await issuesSvc.update(input.issue.id, {
+        const reblocked = await mutationIssuesSvc.update(input.issue.id, {
           status: "blocked",
           blockedByIssueIds: blockerIds,
           assigneeAgentId: recoveryAction.ownerAgentId,
@@ -3374,7 +3376,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       `${input.issue.companyId}:${input.issue.id}`,
       () => db.transaction(async (tx) => {
         await lockIssueDependencyMutation(tx, input.issue.companyId, input.issue.id);
-        return escalateStrandedAssignedIssueUnlocked(input);
+        return escalateStrandedAssignedIssueUnlocked({ ...input, mutationDb: tx });
       }),
     );
   }
