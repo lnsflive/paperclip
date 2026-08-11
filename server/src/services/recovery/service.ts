@@ -3193,11 +3193,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       .limit(1)
       .then((rows) => rows[0] ?? null);
     if (!currentIssue || ["done", "cancelled"].includes(currentIssue.status)) return null;
-    const currentLatestRun = await getLatestIssueRun(currentIssue.companyId, currentIssue.id);
-    if (
-      currentLatestRun?.errorCode === "issue_dependencies_blocked" &&
-      await hasUnresolvedFirstClassBlocker(currentIssue)
-    ) {
+    if (await hasUnresolvedFirstClassBlocker(currentIssue)) {
       return null;
     }
 
@@ -3636,13 +3632,10 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         result.skipped += 1;
         continue;
       }
-      // A cancelled run with this error is an intentional dependency wait. If
-      // the source still has a first-class blocker, it has a live governance
-      // path and must not be recreated as stranded work from stale run data.
-      if (
-        latestRun?.errorCode === "issue_dependencies_blocked" &&
-        await hasUnresolvedFirstClassBlocker(issue)
-      ) {
+      // An unresolved first-class blocker is the authoritative live wait path.
+      // Do not let cancelled dependency-wait runs or stale run/status evidence
+      // recreate stranded recovery or rotate ownership.
+      if (await hasUnresolvedFirstClassBlocker(issue)) {
         result.skipped += 1;
         continue;
       }

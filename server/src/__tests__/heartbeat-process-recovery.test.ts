@@ -5522,6 +5522,53 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     }
   });
 
+  it("does not recreate recovery for a dependency-blocked source across repeated reconciliation", async () => {
+    const { companyId, agentId, issueId } = await seedStrandedIssueFixture({
+      status: "in_progress",
+      runStatus: "cancelled",
+      runErrorCode: "issue_dependencies_blocked",
+      runError: "Issue dependencies are blocked",
+    });
+    const blockerId = randomUUID();
+    const issuePrefix = `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`;
+    await db.insert(issues).values({
+      id: blockerId,
+      companyId,
+      title: "First-class blocker",
+      status: "todo",
+      priority: "high",
+      issueNumber: 2,
+      identifier: `${issuePrefix}-2`,
+    });
+    await db.insert(issueRelations).values({
+      companyId,
+      issueId: blockerId,
+      relatedIssueId: issueId,
+      type: "blocks",
+    });
+
+    const heartbeat = heartbeatService(db);
+    const first = await heartbeat.reconcileStrandedAssignedIssues();
+    const second = await heartbeat.reconcileStrandedAssignedIssues();
+
+    expect(first.escalated).toBe(0);
+    expect(second.escalated).toBe(0);
+    expect(first.skipped).toBe(1);
+    expect(second.skipped).toBe(1);
+    expect(await sourceBlockerIssueIds(companyId, issueId)).toEqual([blockerId]);
+    const source = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0]);
+    expect(source?.status).toBe("in_progress");
+    expect(source?.assigneeAgentId).toBe(agentId);
+    const recoveryActions = await db
+      .select()
+      .from(issueRecoveryActions)
+      .where(and(
+        eq(issueRecoveryActions.companyId, companyId),
+        eq(issueRecoveryActions.sourceIssueId, issueId),
+      ));
+    expect(recoveryActions).toHaveLength(0);
+  });
+
   it("leaves the productive-but-stranded continuation path unchanged under the new classifier", async () => {
     const { agentId, issueId, runId } = await seedStrandedIssueFixture({
       status: "in_progress",
