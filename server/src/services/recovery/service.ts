@@ -98,6 +98,25 @@ const SESSIONED_LOCAL_ADAPTERS = new Set([
   "pi_local",
 ]);
 
+// Reconciliation can be invoked concurrently by the heartbeat sweep and a
+// terminal-run callback. Serialize the source-scoped recovery mutation so the
+// dependency revalidation and ownership update observe one logical decision.
+const strandedRecoveryMutationTails = new Map<string, Promise<void>>();
+
+async function withStrandedRecoveryMutationLock<T>(key: string, work: () => Promise<T>): Promise<T> {
+  const previous = strandedRecoveryMutationTails.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => { release = resolve; });
+  strandedRecoveryMutationTails.set(key, current);
+  await previous;
+  try {
+    return await work();
+  } finally {
+    release();
+    if (strandedRecoveryMutationTails.get(key) === current) strandedRecoveryMutationTails.delete(key);
+  }
+}
+
 // GGU-809: when a stranded `in_progress` issue would otherwise hit the
 // `isRepeatedProductiveContinuationRecovery` escalation path, exempt the
 // escalation if the assignee posted a comment or attachment within this window.
@@ -3143,7 +3162,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     return updated;
   }
 
-  async function escalateStrandedAssignedIssue(input: {
+  async function escalateStrandedAssignedIssueUnlocked(input: {
     issue: typeof issues.$inferSelect;
     previousStatus: StrandedPreviousStatus;
     latestRun: LatestIssueRun;
@@ -3348,6 +3367,13 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     }
 
     return updated;
+  }
+
+  async function escalateStrandedAssignedIssue(input: Parameters<typeof escalateStrandedAssignedIssueUnlocked>[0]) {
+    return withStrandedRecoveryMutationLock(
+      `${input.issue.companyId}:${input.issue.id}`,
+      () => escalateStrandedAssignedIssueUnlocked(input),
+    );
   }
 
   async function persistAdapterFailureRecoveryClassification(
