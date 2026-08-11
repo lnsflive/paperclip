@@ -3504,22 +3504,31 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
   }
 
   async function hasUnresolvedFirstClassBlocker(issue: typeof issues.$inferSelect) {
-    const blocker = await db
-      .select({ id: issueRelations.issueId })
-      .from(issueRelations)
-      .innerJoin(issues, eq(issues.id, issueRelations.issueId))
-      .where(
-        and(
-          eq(issueRelations.companyId, issue.companyId),
-          eq(issueRelations.relatedIssueId, issue.id),
-          eq(issueRelations.type, "blocks"),
-          eq(issues.companyId, issue.companyId),
-          sql.raw(visibleIssueSql("issues")),
-          notInArray(issues.status, ["done", "cancelled"]),
-        ),
-      )
-      .limit(1);
-    return blocker.length > 0;
+    try {
+      const blocker = await db
+        .select({ id: issueRelations.issueId })
+        .from(issueRelations)
+        .innerJoin(issues, eq(issues.id, issueRelations.issueId))
+        .where(
+          and(
+            eq(issueRelations.companyId, issue.companyId),
+            eq(issueRelations.relatedIssueId, issue.id),
+            eq(issueRelations.type, "blocks"),
+            eq(issues.companyId, issue.companyId),
+            sql.raw(visibleIssueSql("issues")),
+            notInArray(issues.status, ["done", "cancelled"]),
+          ),
+        )
+        .limit(1)
+        // A terminal-run callback may be holding the issue row while it writes
+        // the dependency-blocked verdict. Do not wait behind that mutation:
+        // an uncertain blocker read is conservatively treated as a live wait.
+        .for("key share", { of: issues, noWait: true });
+      return blocker.length > 0;
+    } catch (error) {
+      if ((error as { code?: string })?.code === "55P03") return true;
+      throw error;
+    }
   }
 
   function hasPendingProviderQuotaRecoveryMonitor(
