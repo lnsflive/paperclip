@@ -3451,6 +3451,23 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     return participant?.type === "agent" ? participant.agentId : null;
   }
 
+  async function hasUnresolvedFirstClassBlocker(issue: typeof issues.$inferSelect) {
+    const blocker = await db
+      .select({ id: issueRelations.issueId })
+      .from(issueRelations)
+      .innerJoin(issues, eq(issues.id, issueRelations.issueId))
+      .where(
+        and(
+          eq(issueRelations.companyId, issue.companyId),
+          eq(issueRelations.relatedIssueId, issue.id),
+          eq(issueRelations.type, "blocks"),
+          notInArray(issues.status, ["done", "cancelled"]),
+        ),
+      )
+      .limit(1);
+    return blocker.length > 0;
+  }
+
   function hasPendingProviderQuotaRecoveryMonitor(
     issue: typeof issues.$inferSelect,
     latestRun: LatestIssueRun,
@@ -3553,6 +3570,16 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         ? participantLatestRunForRecovery
         : latestRun;
       if (hasPendingProviderQuotaRecoveryMonitor(issue, providerQuotaMonitorRun, recoveryNow)) {
+        result.skipped += 1;
+        continue;
+      }
+      // A cancelled run with this error is an intentional dependency wait. If
+      // the source still has a first-class blocker, it has a live governance
+      // path and must not be recreated as stranded work from stale run data.
+      if (
+        latestRun?.errorCode === "issue_dependencies_blocked" &&
+        await hasUnresolvedFirstClassBlocker(issue)
+      ) {
         result.skipped += 1;
         continue;
       }
