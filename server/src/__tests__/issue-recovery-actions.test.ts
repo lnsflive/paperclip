@@ -25,10 +25,11 @@ import { errorHandler } from "../middleware/index.js";
 import { issueRoutes } from "../routes/issues.js";
 import { buildPaperclipWakePayload } from "../services/heartbeat.js";
 import { issueRecoveryActionService } from "../services/issue-recovery-actions.js";
-import { recoveryService } from "../services/recovery/service.js";
+import { recoveryService, terminalizeOrphanExecutionProjection } from "../services/recovery/service.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
+const ORPHAN_TERMINALIZATION_SUBJECT_ID = "dfd6e459-b3d0-40bb-8d02-014fcb2f125f";
 
 function makeRecoveryActionRow(overrides: Record<string, unknown> = {}) {
   const now = new Date("2026-05-09T19:30:00.000Z");
@@ -216,6 +217,79 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       startedAt: new Date("2026-05-13T18:00:00.000Z"),
       contextSnapshot: input.issueId ? { issueId: input.issueId } : undefined,
     });
+  }
+
+  async function seedOrphanExecutionTerminalizationFixture() {
+    const companyId = randomUUID();
+    const managerId = randomUUID();
+    const orphanIssueId = ORPHAN_TERMINALIZATION_SUBJECT_ID;
+    const recoveryActionId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Recovery Co",
+      issuePrefix: "ECO",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: managerId,
+      companyId,
+      name: "CTO",
+      role: "cto",
+      status: "idle",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(issues).values({
+      id: orphanIssueId,
+      companyId,
+      title: "Canonical orphan execution projection",
+      status: "done",
+      priority: "high",
+      assigneeAgentId: managerId,
+      issueNumber: 1077,
+      identifier: "ECO-1077",
+      executionState: {
+        status: "pending",
+        currentStageId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        currentStageIndex: 4,
+        currentStageType: "approval",
+        currentParticipant: { type: "user", userId: "lead-user" },
+        returnAssignee: { type: "agent", agentId: managerId, userId: null },
+        reviewRequest: null,
+        completedStageIds: ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        lastDecisionId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        lastDecisionOutcome: "approved",
+      },
+    });
+    await db.insert(issueRecoveryActions).values({
+      id: recoveryActionId,
+      companyId,
+      sourceIssueId: orphanIssueId,
+      recoveryIssueId: null,
+      kind: "missing_disposition",
+      status: "resolved",
+      ownerType: "agent",
+      ownerAgentId: managerId,
+      ownerUserId: null,
+      previousOwnerAgentId: null,
+      returnOwnerAgentId: managerId,
+      cause: "successful_run_missing_issue_disposition",
+      fingerprint: "orphan-execution-terminalization",
+      evidence: { sourceRunId: "run-orphan-1" },
+      nextAction: "Terminalize the orphan execution projection.",
+      wakePolicy: null,
+      monitorPolicy: null,
+      attemptCount: 1,
+      maxAttempts: null,
+      timeoutAt: null,
+      lastAttemptAt: new Date("2026-08-10T06:00:00.000Z"),
+      outcome: "owner_completed",
+      resolutionNote: "Execution completed intentionally; only the projection remained orphaned.",
+      resolvedAt: new Date("2026-08-10T06:01:00.000Z"),
+    });
+    return { companyId, managerId, orphanIssueId, recoveryActionId };
   }
 
   function createApp(
@@ -2005,5 +2079,372 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       .from(issueRecoveryActions)
       .where(eq(issueRecoveryActions.id, action.id));
     expect(actionRow?.status).toBe("active");
+  });
+
+  it("terminalizes the exact orphan execution projection and preserves verdict history", async () => {
+    const { companyId, managerId, orphanIssueId, recoveryActionId } = await seedOrphanExecutionTerminalizationFixture();
+
+    const result = await terminalizeOrphanExecutionProjection(db, {
+      companyId,
+      issueId: orphanIssueId,
+      recoveryActionId,
+      expectedExecutionState: {
+        status: "pending",
+        currentStageId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        currentStageIndex: 4,
+        currentStageType: "approval",
+        currentParticipant: { type: "user", userId: "lead-user" },
+        returnAssignee: { type: "agent", agentId: managerId, userId: null },
+        reviewRequest: null,
+        completedStageIds: ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        lastDecisionId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        lastDecisionOutcome: "approved",
+      },
+      actor: {
+        type: "user",
+        id: "lead-user",
+      },
+      reason: "ECO INT-20260806-002 orphan execution terminalization",
+      evidencePointers: [
+        "eco:pm:INT-20260806-002",
+        "eco:subject:ECO-1077",
+        `paperclip:recovery_action:${recoveryActionId}`,
+      ],
+    });
+
+    expect(result).toMatchObject({
+      id: orphanIssueId,
+      status: "done",
+      executionState: {
+        status: "completed",
+        currentStageId: null,
+        currentStageIndex: null,
+        currentStageType: null,
+        currentParticipant: null,
+        completedStageIds: ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        lastDecisionOutcome: "approved",
+      },
+    });
+
+    const [activityRow] = await db
+      .select()
+      .from(activityLog)
+      .where(and(eq(activityLog.entityType, "issue"), eq(activityLog.entityId, orphanIssueId), eq(activityLog.action, "issue.execution_projection_terminalized")));
+    expect(activityRow?.details).toMatchObject({
+      reason: "ECO INT-20260806-002 orphan execution terminalization",
+      evidencePointers: [
+        "eco:pm:INT-20260806-002",
+        "eco:subject:ECO-1077",
+        `paperclip:recovery_action:${recoveryActionId}`,
+      ],
+      recoveryActionId,
+      before: {
+        status: "pending",
+        currentStageId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        currentStageIndex: 4,
+        currentStageType: "approval",
+        currentParticipant: { type: "user", userId: "lead-user" },
+      },
+      after: {
+        status: "completed",
+        currentStageId: null,
+        currentStageIndex: null,
+        currentStageType: null,
+        currentParticipant: null,
+      },
+    });
+  });
+
+  it("rejects orphan execution terminalization when CAS preconditions do not match", async () => {
+    const { companyId, managerId, orphanIssueId, recoveryActionId } = await seedOrphanExecutionTerminalizationFixture();
+    const runId = randomUUID();
+    await seedHeartbeatRun({
+      companyId,
+      agentId: managerId,
+      runId,
+      issueId: orphanIssueId,
+      status: "running",
+    });
+    const app = createApp({
+      type: "agent",
+      agentId: managerId,
+      companyId,
+      runId,
+      source: "agent_jwt",
+    });
+
+    const rejected = await request(app)
+      .post(`/api/issues/${orphanIssueId}/execution-projection/terminalize`)
+      .send({
+        recoveryActionId,
+        reason: "stale expected state",
+        evidencePointers: ["eco:pm:INT-20260806-002"],
+        expectedExecutionState: {
+          status: "completed",
+          currentStageId: null,
+          currentStageIndex: 999,
+          currentStageType: "approval",
+          currentParticipant: null,
+          returnAssignee: null,
+          reviewRequest: null,
+          completedStageIds: [],
+          lastDecisionId: null,
+          lastDecisionOutcome: null,
+        },
+      })
+      .expect(409);
+
+    expect(rejected.body.error).toContain("CAS preconditions did not match");
+
+    const [issueRow] = await db.select().from(issues).where(eq(issues.id, orphanIssueId));
+    expect(issueRow?.executionState).toMatchObject({
+      currentStageIndex: 4,
+      currentStageType: "approval",
+    });
+
+    const activityRows = await db
+      .select()
+      .from(activityLog)
+      .where(and(eq(activityLog.entityType, "issue"), eq(activityLog.entityId, orphanIssueId), eq(activityLog.action, "issue.execution_projection_terminalized")));
+    expect(activityRows).toHaveLength(0);
+  });
+
+  it("rejects terminalization for any non-canonical subject and leaves neighbor issues unchanged", async () => {
+    const { companyId, managerId, recoveryActionId } = await seedOrphanExecutionTerminalizationFixture();
+    const neighborIssueId = randomUUID();
+    await db.insert(issues).values({
+      id: neighborIssueId,
+      companyId,
+      title: "Neighbor execution projection",
+      status: "done",
+      priority: "high",
+      assigneeAgentId: managerId,
+      issueNumber: 1074,
+      identifier: "ECO-1074",
+      executionState: {
+        status: "completed",
+        currentStageId: null,
+        currentStageIndex: 2,
+        currentStageType: "review",
+        currentParticipant: null,
+        returnAssignee: { type: "agent", agentId: managerId, userId: null },
+        reviewRequest: null,
+        completedStageIds: [],
+        lastDecisionId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        lastDecisionOutcome: "approved",
+      },
+    });
+
+    const result = await terminalizeOrphanExecutionProjection(db, {
+      companyId,
+      issueId: neighborIssueId,
+      recoveryActionId,
+      expectedExecutionState: {
+        status: "completed",
+        currentStageId: null,
+        currentStageIndex: 2,
+        currentStageType: "review",
+        currentParticipant: null,
+        returnAssignee: { type: "agent", agentId: managerId, userId: null },
+        reviewRequest: null,
+        completedStageIds: [],
+        lastDecisionId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        lastDecisionOutcome: "approved",
+      },
+      actor: {
+        type: "board",
+        id: "local-board",
+      },
+      reason: "should reject non-canonical subject",
+      evidencePointers: ["eco:pm:INT-20260806-002"],
+    });
+
+    expect(result).toBeNull();
+    const [neighborIssue] = await db.select().from(issues).where(eq(issues.id, neighborIssueId));
+    expect(neighborIssue?.executionState).toMatchObject({
+      currentStageIndex: 2,
+      currentStageType: "review",
+      lastDecisionOutcome: "approved",
+    });
+    const activityRows = await db
+      .select()
+      .from(activityLog)
+      .where(and(eq(activityLog.entityType, "issue"), eq(activityLog.entityId, neighborIssueId), eq(activityLog.action, "issue.execution_projection_terminalized")));
+    expect(activityRows).toHaveLength(0);
+  });
+
+  it("rejects terminalization when the resolved recovery action outcome is not owner_completed", async () => {
+    const { companyId, managerId, orphanIssueId, recoveryActionId } = await seedOrphanExecutionTerminalizationFixture();
+    await db.update(issueRecoveryActions).set({
+      outcome: "restored",
+      resolutionNote: "Recovery restored by runtime; no owner-completed CAS allowed.",
+    }).where(eq(issueRecoveryActions.id, recoveryActionId));
+
+    const result = await terminalizeOrphanExecutionProjection(db, {
+      companyId,
+      issueId: orphanIssueId,
+      recoveryActionId,
+      expectedExecutionState: {
+        status: "pending",
+        currentStageId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        currentStageIndex: 4,
+        currentStageType: "approval",
+        currentParticipant: { type: "user", userId: "lead-user" },
+        returnAssignee: { type: "agent", agentId: managerId, userId: null },
+        reviewRequest: null,
+        completedStageIds: ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        lastDecisionId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        lastDecisionOutcome: "approved",
+      },
+      actor: {
+        type: "board",
+        id: "local-board",
+      },
+      reason: "should reject wrong recovery outcome",
+      evidencePointers: ["eco:pm:INT-20260806-002"],
+    });
+
+    expect(result).toBeNull();
+    const [issueRow] = await db.select().from(issues).where(eq(issues.id, orphanIssueId));
+    expect(issueRow?.executionState).toMatchObject({
+      currentStageIndex: 4,
+      currentStageType: "approval",
+      lastDecisionOutcome: "approved",
+    });
+  });
+
+  it("rejects terminalization when a queued execution run still exists", async () => {
+    const { companyId, managerId, orphanIssueId, recoveryActionId } = await seedOrphanExecutionTerminalizationFixture();
+    await seedHeartbeatRun({
+      companyId,
+      agentId: managerId,
+      runId: randomUUID(),
+      issueId: orphanIssueId,
+      status: "queued",
+    });
+
+    const result = await terminalizeOrphanExecutionProjection(db, {
+      companyId,
+      issueId: orphanIssueId,
+      recoveryActionId,
+      expectedExecutionState: {
+        status: "completed",
+        currentStageId: null,
+        currentStageIndex: 4,
+        currentStageType: "approval",
+        currentParticipant: null,
+        returnAssignee: { type: "agent", agentId: managerId, userId: null },
+        reviewRequest: null,
+        completedStageIds: ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        lastDecisionId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        lastDecisionOutcome: "approved",
+      },
+      actor: {
+        type: "board",
+        id: "local-board",
+      },
+      reason: "should reject while queued run exists",
+      evidencePointers: ["eco:pm:INT-20260806-002"],
+    });
+
+    expect(result).toBeNull();
+    const [issueRow] = await db.select().from(issues).where(eq(issues.id, orphanIssueId));
+    expect(issueRow?.executionState).toMatchObject({
+      currentStageIndex: 4,
+      currentStageType: "approval",
+    });
+  });
+
+  it("rejects terminalization when a queued wakeup for the issue still exists", async () => {
+    const { companyId, managerId, orphanIssueId, recoveryActionId } = await seedOrphanExecutionTerminalizationFixture();
+    await db.insert(agentWakeupRequests).values({
+      companyId,
+      agentId: managerId,
+      source: "issue.execution_policy",
+      reason: "execution_approval_requested",
+      payload: { issueId: orphanIssueId },
+      status: "queued",
+    });
+
+    const result = await terminalizeOrphanExecutionProjection(db, {
+      companyId,
+      issueId: orphanIssueId,
+      recoveryActionId,
+      expectedExecutionState: {
+        status: "completed",
+        currentStageId: null,
+        currentStageIndex: 4,
+        currentStageType: "approval",
+        currentParticipant: null,
+        returnAssignee: { type: "agent", agentId: managerId, userId: null },
+        reviewRequest: null,
+        completedStageIds: ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        lastDecisionId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        lastDecisionOutcome: "approved",
+      },
+      actor: {
+        type: "user",
+        id: "lead-user",
+      },
+      reason: "should reject while wakeup exists",
+      evidencePointers: ["eco:pm:INT-20260806-002"],
+    });
+
+    expect(result).toBeNull();
+    const [issueRow] = await db.select().from(issues).where(eq(issues.id, orphanIssueId));
+    expect(issueRow?.executionState).toMatchObject({
+      currentStageIndex: 4,
+      currentStageType: "approval",
+    });
+  });
+
+  it("fails closed on idempotent retry after the orphan projection is already terminalized", async () => {
+    const { companyId, managerId, orphanIssueId, recoveryActionId } = await seedOrphanExecutionTerminalizationFixture();
+    const expectedExecutionState = {
+      status: "pending",
+      currentStageId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      currentStageIndex: 4,
+      currentStageType: "approval",
+      currentParticipant: { type: "user", userId: "lead-user" },
+      returnAssignee: { type: "agent", agentId: managerId, userId: null },
+      reviewRequest: null,
+      completedStageIds: ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+      lastDecisionId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      lastDecisionOutcome: "approved",
+    };
+
+    const first = await terminalizeOrphanExecutionProjection(db, {
+      companyId,
+      issueId: orphanIssueId,
+      recoveryActionId,
+      expectedExecutionState,
+      actor: {
+        type: "user",
+        id: "lead-user",
+      },
+      reason: "first orphan terminalization",
+      evidencePointers: ["eco:pm:INT-20260806-002"],
+    });
+    expect(first).not.toBeNull();
+
+    const second = await terminalizeOrphanExecutionProjection(db, {
+      companyId,
+      issueId: orphanIssueId,
+      recoveryActionId,
+      expectedExecutionState,
+      actor: {
+        type: "user",
+        id: "lead-user",
+      },
+      reason: "idempotent retry should fail closed",
+      evidencePointers: ["eco:pm:INT-20260806-002"],
+    });
+
+    expect(second).toBeNull();
+    const activityRows = await db
+      .select()
+      .from(activityLog)
+      .where(and(eq(activityLog.entityType, "issue"), eq(activityLog.entityId, orphanIssueId), eq(activityLog.action, "issue.execution_projection_terminalized")));
+    expect(activityRows).toHaveLength(1);
   });
 });

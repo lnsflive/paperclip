@@ -5718,10 +5718,10 @@ export function issueRoutes(
       evidencePointers: body.evidencePointers as string[],
       expectedExecutionState: body.expectedExecutionState as Record<string, unknown>,
       actor: {
-        type: req.actor.type === "agent" ? "agent" : "board",
+        type: req.actor.type === "agent" ? "agent" : "user",
         id: req.actor.type === "agent"
           ? (req.actor.agentId ?? req.actor.keyId ?? "unknown-agent")
-          : (req.actor.userId ?? req.actor.source ?? "board"),
+          : (req.actor.userId ?? req.actor.source ?? "unknown-user"),
         agentId: req.actor.agentId ?? null,
         runId: req.actor.runId ?? null,
       },

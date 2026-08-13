@@ -76,6 +76,7 @@ import {
 import { isAutomaticRecoverySuppressedByPauseHold } from "./pause-hold-guard.js";
 
 const EXECUTION_PATH_HEARTBEAT_RUN_STATUSES = ["queued", "running", "scheduled_retry", "paused"] as const;
+const EXECUTION_PATH_WAKE_REQUEST_STATUSES = ["queued", "deferred_issue_execution", "claimed"] as const;
 const ORPHAN_TERMINALIZATION_SUBJECT_ID = "dfd6e459-b3d0-40bb-8d02-014fcb2f125f";
 
 export type OrphanExecutionTerminalizationInput = {
@@ -83,10 +84,19 @@ export type OrphanExecutionTerminalizationInput = {
   issueId: string;
   expectedExecutionState: Record<string, unknown>;
   recoveryActionId: string;
-  actor: { type: string; id: string; agentId?: string | null; runId?: string | null };
+  actor: { type: "agent" | "user"; id: string; agentId?: string | null; runId?: string | null };
   reason: string;
   evidencePointers: string[];
 };
+
+function wakeRequestTargetsIssue(issueId: string) {
+  return sql`(
+    ${agentWakeupRequests.payload} ->> 'issueId' = ${issueId}
+    or ${agentWakeupRequests.payload} ->> 'taskId' = ${issueId}
+    or ${agentWakeupRequests.payload} -> '_paperclipWakeContext' ->> 'issueId' = ${issueId}
+    or ${agentWakeupRequests.payload} -> '_paperclipWakeContext' ->> 'taskId' = ${issueId}
+  )`;
+}
 
 /**
  * Audit-preserving CAS for an already-completed issue's orphaned execution
@@ -112,7 +122,6 @@ export async function terminalizeOrphanExecutionProjection(
     const currentState = parseIssueExecutionState(issue.executionState);
     const expectedState = parseIssueExecutionState(input.expectedExecutionState);
     if (!currentState || !expectedState || JSON.stringify(currentState) !== JSON.stringify(expectedState)) return null;
-    if (currentState.status !== "completed" || currentState.currentStageId !== null || currentState.currentParticipant !== null) return null;
     const recovery = await tx
       .select()
       .from(issueRecoveryActions)
@@ -126,21 +135,38 @@ export async function terminalizeOrphanExecutionProjection(
       .then((rows) => rows[0] ?? null);
     if (!recovery) return null;
 
+    const runIds = [issue.checkoutRunId, issue.executionRunId].filter((value): value is string => typeof value === "string" && value.length > 0);
     const liveRuns = await tx
       .select({ id: heartbeatRuns.id })
       .from(heartbeatRuns)
       .where(and(
         eq(heartbeatRuns.companyId, input.companyId),
-        sql`(${heartbeatRuns.contextSnapshot}->>'issueId' = ${issue.id} OR ${heartbeatRuns.contextSnapshot}->>'taskId' = ${issue.id})`,
+        or(
+          sql`(${heartbeatRuns.contextSnapshot}->>'issueId' = ${issue.id} OR ${heartbeatRuns.contextSnapshot}->>'taskId' = ${issue.id})`,
+          runIds.length > 0 ? inArray(heartbeatRuns.id, runIds) : sql`false`,
+        ),
         inArray(heartbeatRuns.status, EXECUTION_PATH_HEARTBEAT_RUN_STATUSES),
       ))
       .limit(1);
     if (liveRuns.length > 0) return null;
 
+    const queuedWakeRequests = await tx
+      .select({ id: agentWakeupRequests.id })
+      .from(agentWakeupRequests)
+      .where(and(
+        eq(agentWakeupRequests.companyId, input.companyId),
+        inArray(agentWakeupRequests.status, EXECUTION_PATH_WAKE_REQUEST_STATUSES),
+        wakeRequestTargetsIssue(issue.id),
+      ))
+      .limit(1);
+    if (queuedWakeRequests.length > 0) return null;
+
     const after = {
       ...currentState,
       status: "completed" as const,
       currentStageId: null,
+      currentStageIndex: null,
+      currentStageType: null,
       currentParticipant: null,
     };
     const updated = await tx.update(issues).set({ executionState: after, updatedAt: new Date() })
