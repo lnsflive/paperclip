@@ -40,10 +40,11 @@ const mockDbSelectWhere = vi.hoisted(() => vi.fn(() => ({
 })));
 const mockDbSelectFrom = vi.hoisted(() => vi.fn(() => ({ where: mockDbSelectWhere })));
 const mockDbSelect = vi.hoisted(() => vi.fn(() => ({ from: mockDbSelectFrom })));
+const mockTxInsert = vi.hoisted(() => vi.fn(() => ({ values: vi.fn(async () => undefined) })));
 const mockDb = vi.hoisted(() => ({
   select: mockDbSelect,
-  transaction: vi.fn(async (callback: (tx: { insert: typeof mockDbSelect }) => unknown) => callback({
-    insert: vi.fn(() => ({ values: vi.fn(async () => undefined) })),
+  transaction: vi.fn(async (callback: (tx: { insert: typeof mockTxInsert }) => unknown) => callback({
+    insert: mockTxInsert,
   })),
 }));
 
@@ -177,6 +178,7 @@ describe("issue execution policy routes", () => {
     vi.doUnmock("../middleware/index.js");
     registerModuleMocks();
     vi.clearAllMocks();
+    mockTxInsert.mockImplementation(() => ({ values: vi.fn(async () => undefined) }));
     mockIssueService.assertCheckoutOwner.mockResolvedValue({ adoptedFromRunId: null });
     mockIssueService.findMentionedAgents.mockResolvedValue([]);
     mockIssueService.getRelationSummaries.mockResolvedValue({ blockedBy: [], blocks: [] });
@@ -529,6 +531,72 @@ describe("issue execution policy routes", () => {
 
     expect(res.status, JSON.stringify(res.body)).toBe(422);
     expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  it("preserves the prior decision across PATCH re-entry and routes the writer decision forward", async () => {
+    const executorAgentId = "33333333-3333-4333-8333-333333333333";
+    const writerAgentId = "44444444-4444-4444-8444-444444444444";
+    const approverAgentId = "66666666-6666-4666-8666-666666666666";
+    const reviewStageId = "11111111-1111-4111-8111-111111111111";
+    const approvalStageId = "22222222-2222-4222-8222-222222222222";
+    const priorDecisionId = "b6743115-ddef-4215-af3c-b903f4b1864b";
+    const policy = normalizeIssueExecutionPolicy({
+      commentRequired: true,
+      approvalsNeeded: 1,
+      stages: [
+        { id: reviewStageId, type: "review", participants: [{ type: "agent", agentId: writerAgentId }] },
+        { id: approvalStageId, type: "approval", participants: [{ type: "agent", agentId: approverAgentId }] },
+      ],
+    })!;
+    let issue: any = {
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      companyId: "company-1", status: "in_progress", assigneeAgentId: executorAgentId,
+      assigneeUserId: null, createdByUserId: "local-board", identifier: "PAP-1013",
+      title: "Sequential writer decision", executionPolicy: policy,
+      executionState: {
+        status: "changes_requested", currentStageId: reviewStageId, currentStageIndex: 0,
+        currentStageType: "review", currentParticipant: { type: "agent", agentId: writerAgentId },
+        returnAssignee: { type: "agent", agentId: executorAgentId }, completedStageIds: [],
+        lastDecisionId: priorDecisionId, lastDecisionOutcome: "changes_requested",
+      },
+    };
+    mockIssueService.getById.mockImplementation(async () => issue);
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, any>) => {
+      issue = { ...issue, ...patch };
+      return issue;
+    });
+    mockIssueService.addComment.mockImplementation(async (_id: string, body: string) => ({ id: `comment-${body.slice(0, 4)}`, body }));
+
+    const reentry = await request(await createApp()).patch(`/api/issues/${issue.id}`).send({
+      status: "in_review", assigneeAgentId: executorAgentId,
+    });
+    expect(reentry.status, JSON.stringify(reentry.body)).toBe(200);
+    expect(issue.assigneeAgentId).toBe(writerAgentId);
+    expect(issue.executionState.lastDecisionId).toBe(priorDecisionId);
+
+    const writerDecision = await request(await createApp({
+      type: "agent", agentId: writerAgentId, companyId: "company-1", runId: "run-writer",
+    })).post(`/api/issues/${issue.id}/comments`).send({
+      body: "kind: review\ndecision: approved", authorType: "agent",
+    });
+    expect(writerDecision.status, JSON.stringify(writerDecision.body)).toBe(201);
+    expect(issue.executionState).toMatchObject({
+      status: "pending", currentStageId: approvalStageId, currentStageIndex: 1,
+      currentStageType: "approval", currentParticipant: { type: "agent", agentId: approverAgentId },
+      completedStageIds: [reviewStageId], lastDecisionOutcome: "approved",
+    });
+    expect(issue.executionState.lastDecisionId).not.toBe(priorDecisionId);
+    expect(mockTxInsert).toHaveBeenCalled();
+
+    const approverDecision = await request(await createApp({
+      type: "agent", agentId: approverAgentId, companyId: "company-1", runId: "run-approver",
+    })).post(`/api/issues/${issue.id}/comments`).send({
+      body: "kind: review\ndecision: approved", authorType: "agent",
+    });
+    expect(approverDecision.status, JSON.stringify(approverDecision.body)).toBe(201);
+    expect(issue.status).toBe("done");
+    expect(issue.executionState.status).toBe("completed");
+    expect(issue.executionState.completedStageIds).toEqual([reviewStageId, approvalStageId]);
   });
 
   it("atomically appends the participant's approval evidence and advances the stage", async () => {
