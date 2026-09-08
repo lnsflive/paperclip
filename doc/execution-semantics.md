@@ -373,6 +373,12 @@ developer, while stage-less external reviews retain their agent owner. Company
 membership, all-blocker/workspace-finalization readiness, pause, idempotency and
 dispatch checks still apply. The claim-time dependency check remains authoritative
 if dependencies change after promotion.
+The same recorded execution owner governs deferred-promotion slot reservation,
+claim-time active-run registration, and queued-holder reassignment checks. A
+matching pending reviewer is not a stale holder merely because the saved
+developer remains assigned. Context-only developer input does not take the
+reviewer's slot. Ownership is read under the issue row lock before registering
+execution, so cancellation and interrupt surfaces can find the actual reviewer.
 Permitted blocked interactions carry current unresolved-blocker context for the
 adapter's bounded-interaction instructions. If dependencies change before claim,
 cancelled assignment runs release and promote deferred work after leaving the

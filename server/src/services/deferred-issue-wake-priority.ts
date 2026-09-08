@@ -37,13 +37,17 @@ export function preferredDeferredIssueWakeAgent(issue: DeferredIssueOwnership): 
  * executor. Legacy external reviews without a native stage retain their owner.
  * Callers still enforce company membership, readiness, pause and dispatch gates.
  */
-export function resolvedDependencyWakeAgent(issue: DeferredIssueOwnership): string | null {
+export function recordedIssueExecutionAgent(issue: DeferredIssueOwnership): string | null {
   if (issue.assigneeUserId) return null;
   if (issue.status === "in_review" && (
     issue.executionPolicy?.stages.length
     || issue.executionState?.currentStageId
     || issue.executionState?.currentParticipant
   )) return preferredDeferredIssueWakeAgent(issue);
+  return issue.assigneeAgentId;
+}
+
+export function resolvedDependencyWakeAgent(issue: DeferredIssueOwnership): string | null {
   return ["blocked", "todo", "in_progress", "in_review"].includes(issue.status)
-    ? issue.assigneeAgentId : null;
+    ? recordedIssueExecutionAgent(issue) : null;
 }

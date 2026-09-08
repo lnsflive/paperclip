@@ -196,6 +196,41 @@ describeEmbeddedPostgres("heartbeat lock release on cross-agent reassignment", (
     expect(issue?.executionRunId).toBe(holderRunId);
   });
 
+  it("retains a queued native reviewer when the saved developer receives another wake", async () => {
+    const { coderAgentId, reviewerAgentId, issueId, holderRunId, wakeupRequestId } =
+      await seedCrossAgentScenario({ holderStatus: "queued" });
+    const stageId = randomUUID();
+    await db.update(heartbeatRuns).set({ agentId: reviewerAgentId }).where(eq(heartbeatRuns.id, holderRunId));
+    await db.update(agentWakeupRequests).set({ agentId: reviewerAgentId }).where(eq(agentWakeupRequests.id, wakeupRequestId));
+    await db.update(issues).set({
+      assigneeAgentId: coderAgentId, executionAgentNameKey: "reviewer",
+      executionPolicy: { mode: "auto", commentRequired: true, stages: [{
+        id: stageId, type: "review", approvalsNeeded: 1,
+        participants: [{ id: randomUUID(), type: "agent", agentId: reviewerAgentId }],
+      }] },
+      executionState: {
+        status: "pending", currentStageId: stageId, currentStageIndex: 0,
+        currentStageType: "review", currentParticipant: { type: "agent", agentId: reviewerAgentId },
+        returnAssignee: { type: "agent", agentId: coderAgentId }, completedStageIds: [],
+        reviewRequest: null, lastDecisionId: null, lastDecisionOutcome: null,
+      },
+    }).where(eq(issues.id, issueId));
+    const followup = await heartbeatService(db).wakeup(coderAgentId, {
+      source: "comment", triggerDetail: "system", reason: "issue_commented",
+      payload: { issueId }, contextSnapshot: { issueId, wakeReason: "issue_commented" },
+      requestedByActorType: "user", requestedByActorId: "local-board",
+    });
+    expect(followup).toBeNull();
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, holderRunId)))[0])
+      .toMatchObject({ status: "queued", agentId: reviewerAgentId, errorCode: null });
+    expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0])
+      .toMatchObject({ assigneeAgentId: coderAgentId, executionRunId: holderRunId });
+    expect(await db.select().from(agentWakeupRequests).where(and(
+      eq(agentWakeupRequests.agentId, coderAgentId),
+      eq(agentWakeupRequests.status, "deferred_issue_execution"),
+    ))).toHaveLength(1);
+  });
+
   // Race-guard regression: the cancel UPDATE for the queued holder is pinned
   // to the exact non-running status that was read just above it. If a worker
   // races in and flips the holder from `queued` → `running` between that

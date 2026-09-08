@@ -80,7 +80,7 @@ import {
 // git-credentials module became its canonical home; existing importers keep working.
 export { scrubGitCredentialText };
 import { publishLiveEvent } from "./live-events.js";
-import { preferredDeferredIssueWakeAgent } from "./deferred-issue-wake-priority.js";
+import { preferredDeferredIssueWakeAgent, recordedIssueExecutionAgent } from "./deferred-issue-wake-priority.js";
 import { normalizeResponsibleUserDenialCode } from "./responsible-user-denial-run-outcomes.js";
 import { getRunLogStore, type RunLogHandle } from "./run-log-store.js";
 import { getServerAdapter, listAdapterModelProfiles, runningProcesses } from "../adapters/index.js";
@@ -12532,24 +12532,33 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const claimedWakeReason = readNonEmptyString(claimedContext.wakeReason);
     if (claimedIssueId && claimedWakeReason !== "source_scoped_recovery_action") {
       const claimedAgent = await getAgent(claimed.agentId);
-      await db
-        .update(issues)
-        .set({
-          executionRunId: claimed.id,
-          executionAgentNameKey: normalizeAgentNameKey(claimedAgent?.name),
-          executionLockedAt: claimedAt,
-          updatedAt: claimedAt,
-        })
-        .where(
-          and(
-            eq(issues.id, claimedIssueId),
-            eq(issues.companyId, claimed.companyId),
-            // Mention/context runs can touch an issue, but only the current assignee
-            // owns the issue execution lock shown as the active run.
-            eq(issues.assigneeAgentId, claimed.agentId),
-            or(isNull(issues.executionRunId), eq(issues.executionRunId, claimed.id)),
-          ),
-        );
+      await db.transaction(async (tx) => {
+        const currentIssue = await tx.select().from(issues)
+          .where(and(eq(issues.id, claimedIssueId), eq(issues.companyId, claimed.companyId)))
+          .for("update").then((rows) => rows[0] ?? null);
+        if (!currentIssue || recordedIssueExecutionAgent({
+          ...currentIssue,
+          executionPolicy: normalizeIssueExecutionPolicy(currentIssue.executionPolicy),
+          executionState: parseIssueExecutionState(currentIssue.executionState),
+        }) !== claimed.agentId) return;
+        await tx
+          .update(issues)
+          .set({
+            executionRunId: claimed.id,
+            executionAgentNameKey: normalizeAgentNameKey(claimedAgent?.name),
+            executionLockedAt: claimedAt,
+            updatedAt: claimedAt,
+          })
+          .where(
+            and(
+              eq(issues.id, claimedIssueId),
+              eq(issues.companyId, claimed.companyId),
+              // Ownership was validated under this row lock. A native reviewer can
+              // own execution while the saved developer remains the assignee.
+              or(isNull(issues.executionRunId), eq(issues.executionRunId, claimed.id)),
+            ),
+          );
+      });
     }
 
     return claimed;
@@ -16827,16 +16836,23 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           })
           .where(eq(agentWakeupRequests.id, deferred.id));
 
-        await tx
-          .update(issues)
-          .set({
-            executionRunId: newRun.id,
-            executionAgentNameKey: normalizeAgentNameKey(deferredAgent.name),
-            executionLockedAt: now,
-            updatedAt: now,
-          })
-          // Promoted mention wakes are issue-scoped, not issue ownership transfers.
-          .where(and(eq(issues.id, issue.id), eq(issues.assigneeAgentId, deferredAgent.id)));
+        // The issue remains row-locked. Context input from the saved developer
+        // must not take the pending reviewer's slot merely by matching assignee.
+        if (recordedIssueExecutionAgent({
+          ...issue,
+          executionPolicy: normalizeIssueExecutionPolicy(issue.executionPolicy),
+          executionState: parseIssueExecutionState(issue.executionState),
+        }) === deferredAgent.id) {
+          await tx
+            .update(issues)
+            .set({
+              executionRunId: newRun.id,
+              executionAgentNameKey: normalizeAgentNameKey(deferredAgent.name),
+              executionLockedAt: now,
+              updatedAt: now,
+            })
+            .where(and(eq(issues.id, issue.id), eq(issues.companyId, issue.companyId)));
+        }
 
         return {
           kind: "promoted" as const,
@@ -17521,6 +17537,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             executionWorkspacePreference: issues.executionWorkspacePreference,
             executionWorkspaceSettings: issues.executionWorkspaceSettings,
             assigneeAgentId: issues.assigneeAgentId,
+            assigneeUserId: issues.assigneeUserId,
+            executionPolicy: issues.executionPolicy,
+            executionState: issues.executionState,
             executionRunId: issues.executionRunId,
             executionAgentNameKey: issues.executionAgentNameKey,
             createdAt: issues.createdAt,
@@ -17674,7 +17693,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         }
 
         // A queued/scheduled run holding the lock for an agent that is
-        // no longer the issue's assignee is stale by design — the issue
+        // no longer the issue's recorded execution owner is stale — the issue
         // has been re-routed (e.g. blocked → in_review with a different
         // assignee). Cancel it and release the lock; otherwise the new
         // assignee's wake gets parked in `deferred_issue_execution`
@@ -17688,11 +17707,16 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         // claimed running run. If zero rows matched, leave
         // `activeExecutionRun` populated so the defer path runs
         // normally against the now-running holder.
+        const executionOwnerId = recordedIssueExecutionAgent({
+          ...issue,
+          executionPolicy: normalizeIssueExecutionPolicy(issue.executionPolicy),
+          executionState: parseIssueExecutionState(issue.executionState),
+        });
         if (
           activeExecutionRun &&
           activeExecutionRun.status !== "running" &&
-          issue.assigneeAgentId &&
-          activeExecutionRun.agentId !== issue.assigneeAgentId
+          executionOwnerId &&
+          activeExecutionRun.agentId !== executionOwnerId
         ) {
           const cancelled = await tx
             .update(heartbeatRuns)

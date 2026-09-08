@@ -1051,6 +1051,8 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
   it.each([
     { status: "in_progress", ownerState: "active" },
     { status: "in_review", ownerState: "active" },
+    { status: "in_review", ownerState: "active", savedDeveloper: true },
+    { status: "in_review", ownerState: "active", savedDeveloper: true, dependenciesBlocked: true },
     { status: "in_progress", ownerState: "paused" },
     { status: "in_progress", ownerState: "terminated" },
     { status: "in_progress", ownerState: "foreign-company" },
@@ -1061,7 +1063,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     { status: "in_progress", ownerState: "active", dependenciesBlocked: true, blockAtClaim: true, sameAgent: true },
     { status: "in_progress", ownerState: "active", dependenciesBlocked: true, resolveAtClaim: true },
     { status: "in_progress", ownerState: "active", dependenciesBlocked: true, resolveAtClaim: true, sameAgent: true },
-  ])("prioritizes eligible native owners and preserves input ($status/$ownerState/blocked=$dependenciesBlocked/same=$sameAgent/race=$blockAtClaim/resolve=$resolveAtClaim)", async ({ status, ownerState, dependenciesBlocked = false, sameAgent = false, blockAtClaim = false, resolveAtClaim = false }) => {
+  ])("prioritizes eligible native owners and preserves input ($status/$ownerState/blocked=$dependenciesBlocked/same=$sameAgent/race=$blockAtClaim/resolve=$resolveAtClaim/saved=$savedDeveloper)", async ({ status, ownerState, dependenciesBlocked = false, sameAgent = false, blockAtClaim = false, resolveAtClaim = false, savedDeveloper = false }) => {
     const { companyId, agentId } = await seedCompanyAndAgent();
     const { companyId: otherCompanyId } = await seedCompanyAndAgent();
     const nextAgentId = randomUUID();
@@ -1083,7 +1085,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     const { runId } = await seedQueuedRun({ companyId, agentId, issueId, wakeReason: "issue_assigned" });
     await db.insert(issues).values({
       id: issueId, companyId, title: "Native handoff priority", status,
-      assigneeAgentId: nextAgentId, executionRunId: runId,
+      assigneeAgentId: savedDeveloper ? agentId : nextAgentId, executionRunId: runId,
       executionPolicy: {
         mode: "auto", commentRequired: true,
         stages: [{ id: stageId, type: "review", approvalsNeeded: 1,
@@ -1173,7 +1175,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       const [promoted] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, promotedId));
       expect(promoted?.agentId).toBe(ownerEligible ? nextAgentId : commentAgentId);
       const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
-      expect(issue?.assigneeAgentId).toBe(nextAgentId);
+      expect(issue?.assigneeAgentId).toBe(savedDeveloper ? agentId : nextAgentId);
       expect(issue?.executionRunId).toBe(ownerEligible || sameAgent ? promoted?.id : null);
       expect(await waitForCondition(async () => countExecuteCallsForRun(promoted!.id) === 1)).toBe(true);
       if (dependenciesBlocked) {
