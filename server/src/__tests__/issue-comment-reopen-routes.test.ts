@@ -2545,7 +2545,8 @@ describe.sequential("issue comment reopen routes", () => {
     mockIssueService.listWakeableBlockedDependents.mockResolvedValue([
       {
         id: "dependent-1",
-        assigneeAgentId: dependentAgentId,
+        assigneeAgentId: "saved-dependent-developer",
+        wakeAgentId: dependentAgentId,
         blockerIssueIds: [issue.id],
       },
     ]);

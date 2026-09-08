@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { IssueExecutionPolicy, IssueExecutionState } from "@paperclipai/shared";
-import { preferredDeferredIssueWakeAgent } from "../services/deferred-issue-wake-priority.js";
+import { preferredDeferredIssueWakeAgent, resolvedDependencyWakeAgent } from "../services/deferred-issue-wake-priority.js";
 
 function fixture() {
   const executionPolicy: IssueExecutionPolicy = {
@@ -19,6 +19,31 @@ function fixture() {
 }
 
 describe("deferred issue wake owner priority", () => {
+  it("resolves dependency wakes to a typed reviewer without overwriting the saved assignee", () => {
+    const issue = { ...fixture(), assigneeAgentId: "developer" };
+    expect(resolvedDependencyWakeAgent(issue)).toBe("reviewer");
+    expect(issue.assigneeAgentId).toBe("developer");
+  });
+
+  it.each(["blocked", "todo", "in_progress"])("dependency resolution retains the %s execution owner", (status) => {
+    expect(resolvedDependencyWakeAgent({ ...fixture(), status, assigneeAgentId: "developer" })).toBe("developer");
+  });
+
+  it("preserves stage-less external review and excludes human or malformed native reviews", () => {
+    expect(resolvedDependencyWakeAgent({ ...fixture(), executionPolicy: null, executionState: null })).toBe("reviewer");
+    expect(resolvedDependencyWakeAgent({ ...fixture(), assigneeUserId: "board" })).toBeNull();
+    const issue = fixture();
+    issue.executionState.currentParticipant = { type: "user", userId: "board" };
+    expect(resolvedDependencyWakeAgent(issue)).toBeNull();
+    issue.executionState.currentParticipant = { type: "agent", agentId: "reviewer" };
+    issue.executionState.currentStageId = "stale";
+    expect(resolvedDependencyWakeAgent(issue)).toBeNull();
+  });
+
+  it.each(["backlog", "done", "cancelled"])("does not resume %s work after a dependency resolves", (status) => {
+    expect(resolvedDependencyWakeAgent({ ...fixture(), status })).toBeNull();
+  });
+
   it("prefers the pending typed reviewer", () => {
     expect(preferredDeferredIssueWakeAgent(fixture())).toBe("reviewer");
   });

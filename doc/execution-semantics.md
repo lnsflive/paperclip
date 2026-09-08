@@ -364,9 +364,15 @@ the issue slot ahead of an already queued native handoff.
 Before promotion, unresolved dependency gates skip non-interaction wakes and
 continue scanning the deferred queue in the same transaction. This preserves
 permitted comment follow-ups even when the preferred assignment cannot run.
-Skipped wake payloads remain available for audit; normal blocker resolution
-wakes the assignee. The claim-time dependency check remains authoritative if
-dependencies change after promotion.
+Skipped wake payloads remain available for audit. Normal blocker resolution
+wakes the execution owner, or the pending typed participant of a matching native
+review stage even when the saved executor remains the assignee. Completion routes
+and the periodic/finalization backstop use the same recipient rule; neither changes
+assignment. Human or inconsistent native stages never fall back to the saved
+developer, while stage-less external reviews retain their agent owner. Company
+membership, all-blocker/workspace-finalization readiness, pause, idempotency and
+dispatch checks still apply. The claim-time dependency check remains authoritative
+if dependencies change after promotion.
 Permitted blocked interactions carry current unresolved-blocker context for the
 adapter's bounded-interaction instructions. If dependencies change before claim,
 cancelled assignment runs release and promote deferred work after leaving the
