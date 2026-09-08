@@ -12374,7 +12374,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     return Number(count ?? 0);
   }
 
-  async function claimQueuedRun(run: typeof heartbeatRuns.$inferSelect, companyAgents?: AgentOrgRow[]) {
+  async function claimQueuedRun(
+    run: typeof heartbeatRuns.$inferSelect,
+    companyAgents?: AgentOrgRow[],
+    dependencyReleasesAfterStartLock?: Array<typeof heartbeatRuns.$inferSelect>,
+  ) {
     if (run.status !== "queued") return run;
     const agent = await getAgent(run.agentId);
     if (!agent) {
@@ -12410,6 +12414,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     }
 
     const issueId = readNonEmptyString(context.issueId);
+    let dependencyInteractionContext: Record<string, unknown> | null = null;
     if (issueId) {
       const activePauseHold = await treeControlSvc.getActivePauseHoldGate(run.companyId, issueId);
       const treeHoldInteractionWake = activePauseHold && await isVerifiedIssueTreeControlInteractionWake(db, {
@@ -12447,9 +12452,24 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       const readiness = dependencyReadiness.get(issueId);
       const unresolvedBlockerCount = readiness?.unresolvedBlockerCount ?? 0;
       if (unresolvedBlockerCount > 0 && !allowsIssueInteractionWake(context)) {
-        await cancelQueuedRunForBlockedDependencies(run, issueId, readiness?.unresolvedBlockerIssueIds ?? []);
+        const cancelled = await cancelQueuedRunForBlockedDependencies(run, issueId, readiness?.unresolvedBlockerIssueIds ?? []);
+        if (cancelled) {
+          if (dependencyReleasesAfterStartLock) dependencyReleasesAfterStartLock.push(cancelled);
+          else await releaseIssueExecutionAndPromote(cancelled, { suppressImmediateRecovery: true });
+        }
         logger.info({ runId: run.id, issueId, unresolvedBlockerCount }, "claimQueuedRun: cancelled blocked queued run");
         return null;
+      }
+      if (unresolvedBlockerCount > 0 && readiness) {
+        dependencyInteractionContext = {
+          dependencyBlockedInteraction: true,
+          unresolvedBlockerIssueIds: readiness.unresolvedBlockerIssueIds,
+          unresolvedBlockerCount: readiness.unresolvedBlockerCount,
+          unresolvedBlockerSummaries: await listUnresolvedBlockerSummaries(
+            db, run.companyId, issueId, readiness.unresolvedBlockerIssueIds,
+          ),
+        };
+        Object.assign(context, dependencyInteractionContext);
       }
 
       const staleness = await evaluateQueuedRunStaleness(run, issueId, context);
@@ -12475,6 +12495,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       .set({
         status: "running",
         responsibleUserId,
+        contextSnapshot: dependencyInteractionContext
+          ? sql`coalesce(${heartbeatRuns.contextSnapshot}, '{}'::jsonb) || ${JSON.stringify(dependencyInteractionContext)}::jsonb`
+          : heartbeatRuns.contextSnapshot,
         startedAt: run.startedAt ?? claimedAt,
         updatedAt: claimedAt,
       })
@@ -13431,7 +13454,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     if ((await getSchedulingSuppression()).suppressed) return [];
     const cutoff = await getWorktreeExecutionCutoff();
 
-    return withAgentStartLock(agentId, async () => {
+    const dependencyReleasesAfterStartLock: Array<typeof heartbeatRuns.$inferSelect> = [];
+    const startedRuns = withAgentStartLock(agentId, async () => {
       const agent = await getAgent(agentId);
       if (!agent) return [];
       const invokability = await getAgentInvokability(agent);
@@ -13498,7 +13522,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       const claimedRuns: Array<typeof heartbeatRuns.$inferSelect> = [];
       for (const queuedRun of prioritizedRuns) {
         if (claimedRuns.length >= availableSlots) break;
-        const claimed = await claimQueuedRun(queuedRun, companyAgents);
+        const claimed = await claimQueuedRun(queuedRun, companyAgents, dependencyReleasesAfterStartLock);
         if (claimed) claimedRuns.push(claimed);
       }
       if (claimedRuns.length === 0) return [];
@@ -13518,6 +13542,15 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       }
       return claimedRuns;
     });
+    try {
+      return await startedRuns;
+    } finally {
+      // Promotion may start another run for this same agent. Release the start
+      // lock first; otherwise cancellation recovery recursively waits on itself.
+      for (const cancelled of dependencyReleasesAfterStartLock) {
+        await releaseIssueExecutionAndPromote(cancelled, { suppressImmediateRecovery: true });
+      }
+    }
   }
 
   // Await every background heartbeat execution that is currently in flight. A
@@ -16506,8 +16539,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
 
       const deferredDependencyReadiness = await issuesSvc.listDependencyReadiness(issue.companyId, [issue.id], tx);
+      const deferredReadiness = deferredDependencyReadiness.get(issue.id);
       const deferredDependenciesBlocked =
-        (deferredDependencyReadiness.get(issue.id)?.unresolvedBlockerCount ?? 0) > 0;
+        (deferredReadiness?.unresolvedBlockerCount ?? 0) > 0;
 
       while (true) {
         // The issue row is locked above. Honor its current owner before an
@@ -16724,6 +16758,15 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             })
             .where(eq(agentWakeupRequests.id, deferred.id));
           continue;
+        }
+
+        if (deferredDependenciesBlocked && deferredReadiness) {
+          promotedContextSnapshot.dependencyBlockedInteraction = true;
+          promotedContextSnapshot.unresolvedBlockerIssueIds = deferredReadiness.unresolvedBlockerIssueIds;
+          promotedContextSnapshot.unresolvedBlockerCount = deferredReadiness.unresolvedBlockerCount;
+          promotedContextSnapshot.unresolvedBlockerSummaries = await listUnresolvedBlockerSummaries(
+            tx, issue.companyId, issue.id, deferredReadiness.unresolvedBlockerIssueIds,
+          );
         }
 
         const sessionBefore =

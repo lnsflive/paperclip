@@ -1057,7 +1057,9 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     { status: "in_progress", ownerState: "active", dependenciesBlocked: true },
     { status: "in_review", ownerState: "active", dependenciesBlocked: true },
     { status: "in_progress", ownerState: "active", dependenciesBlocked: true, sameAgent: true },
-  ])("prioritizes eligible native owners and preserves input ($status/$ownerState/blocked=$dependenciesBlocked/same=$sameAgent)", async ({ status, ownerState, dependenciesBlocked = false, sameAgent = false }) => {
+    { status: "in_progress", ownerState: "active", dependenciesBlocked: true, blockAtClaim: true },
+    { status: "in_progress", ownerState: "active", dependenciesBlocked: true, blockAtClaim: true, sameAgent: true },
+  ])("prioritizes eligible native owners and preserves input ($status/$ownerState/blocked=$dependenciesBlocked/same=$sameAgent/race=$blockAtClaim)", async ({ status, ownerState, dependenciesBlocked = false, sameAgent = false, blockAtClaim = false }) => {
     const { companyId, agentId } = await seedCompanyAndAgent();
     const { companyId: otherCompanyId } = await seedCompanyAndAgent();
     const nextAgentId = randomUUID();
@@ -1094,10 +1096,11 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       },
     });
     const oldRequestedAt = new Date("2026-01-01T00:00:00Z");
+    const blockerId = randomUUID();
+    const addBlocker = () => db.insert(issueRelations).values({ companyId, issueId: blockerId, relatedIssueId: issueId, type: "blocks" });
     if (dependenciesBlocked) {
-      const blockerId = randomUUID();
       await db.insert(issues).values({ id: blockerId, companyId, title: "Unresolved dependency", status: "todo" });
-      await db.insert(issueRelations).values({ companyId, issueId: blockerId, relatedIssueId: issueId, type: "blocks" });
+      if (!blockAtClaim) await addBlocker();
     }
     const commentIds = [randomUUID(), randomUUID()];
     await db.insert(issueComments).values(commentIds.map((id) => ({
@@ -1131,6 +1134,16 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       return { exitCode: 0, signal: null, timedOut: false, errorMessage: null,
         summary: "Handoff priority fixture", provider: "test", model: "test-model" };
     });
+    const originalTransaction = db.transaction.bind(db);
+    const promotionRace = blockAtClaim ? vi.spyOn(db, "transaction").mockImplementation(async (...args) => {
+      const result = await originalTransaction(...args);
+      if ((result as { kind?: string } | undefined)?.kind === "promoted") {
+        promotionRace!.mockRestore();
+        // A real dependency commit lands after promotion commits, before claim.
+        await addBlocker();
+      }
+      return result;
+    }) : null;
     try {
       // Only a seeded, process-free run in this isolated test database is cancelled.
       await heartbeat.cancelRun(runId, "Fixture holder finished");
@@ -1143,9 +1156,11 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
         expect(ownerWake?.runId).toBeTruthy();
         expect(oldWake).toMatchObject({ status: "deferred_issue_execution", runId: null });
       } else if (dependenciesBlocked) {
-        expect(ownerWake).toMatchObject({ status: "skipped", runId: null });
-        expect(ownerWake?.error).toContain("dependencies are still blocked");
         expect(oldWake?.runId).toBeTruthy();
+        expect(ownerWake?.status).toBe("skipped");
+        if (blockAtClaim) expect(ownerWake?.runId).toBeTruthy();
+        else expect(ownerWake?.runId).toBeNull();
+        expect(ownerWake?.error).toContain("dependencies are still blocked");
       } else {
         expect(ownerWake).toMatchObject({ status: "failed", runId: null });
         expect(ownerWake?.error).toContain("agent is not invokable");
@@ -1159,15 +1174,26 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       expect(issue?.executionRunId).toBe(ownerEligible || sameAgent ? promoted?.id : null);
       expect(await waitForCondition(async () => countExecuteCallsForRun(promoted!.id) === 1)).toBe(true);
       if (dependenciesBlocked) {
-        expect(promoted?.contextSnapshot).toMatchObject({ wakeReason: "issue_commented", wakeCommentIds: commentIds });
+        expect(promoted?.contextSnapshot).toMatchObject({
+          wakeReason: "issue_commented", wakeCommentIds: commentIds,
+          dependencyBlockedInteraction: true, unresolvedBlockerCount: 1,
+          unresolvedBlockerIssueIds: [blockerId],
+          unresolvedBlockerSummaries: [expect.objectContaining({ id: blockerId })],
+        });
         const issueRuns = await db.select().from(heartbeatRuns);
-        expect(issueRuns.filter((row) => row.wakeupRequestId === ownerWakeId)).toHaveLength(0);
+        const ownerRuns = issueRuns.filter((row) => row.wakeupRequestId === ownerWakeId);
+        expect(ownerRuns).toHaveLength(blockAtClaim ? 1 : 0);
+        for (const ownerRun of ownerRuns) {
+          expect(ownerRun).toMatchObject({ status: "cancelled", errorCode: "issue_dependencies_blocked" });
+          expect(countExecuteCallsForRun(ownerRun.id)).toBe(0);
+        }
       }
       await db.insert(issueComments).values({
         companyId, issueId, authorAgentId: promoted!.agentId, createdByRunId: promoted!.id,
         body: "Fixture handoff recorded; no missing-comment recovery is required.",
       });
     } finally {
+      promotionRace?.mockRestore();
       // Prevent fixture-only successful-run recovery while letting both inputs drain.
       await db.update(issues).set({ status: "done", executionState: null }).where(eq(issues.id, issueId));
       releaseAdapter();

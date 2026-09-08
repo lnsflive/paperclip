@@ -367,6 +367,10 @@ permitted comment follow-ups even when the preferred assignment cannot run.
 Skipped wake payloads remain available for audit; normal blocker resolution
 wakes the assignee. The claim-time dependency check remains authoritative if
 dependencies change after promotion.
+Permitted blocked interactions carry current unresolved-blocker context for the
+adapter's bounded-interaction instructions. If dependencies change before claim,
+cancelled assignment runs release and promote deferred work after leaving the
+agent-start lock, including when the next permitted interaction uses that agent.
 
 Pause and tree-control previews should make the same distinction visible. They should report whether the affected subtree contains live running work, queued wakes, agent-owned work, or only human-owned/static issues, so a pause after a handoff does not look like it interrupted agent execution when no agent execution path existed.
 
