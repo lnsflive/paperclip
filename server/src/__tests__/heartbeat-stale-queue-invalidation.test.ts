@@ -1059,7 +1059,9 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     { status: "in_progress", ownerState: "active", dependenciesBlocked: true, sameAgent: true },
     { status: "in_progress", ownerState: "active", dependenciesBlocked: true, blockAtClaim: true },
     { status: "in_progress", ownerState: "active", dependenciesBlocked: true, blockAtClaim: true, sameAgent: true },
-  ])("prioritizes eligible native owners and preserves input ($status/$ownerState/blocked=$dependenciesBlocked/same=$sameAgent/race=$blockAtClaim)", async ({ status, ownerState, dependenciesBlocked = false, sameAgent = false, blockAtClaim = false }) => {
+    { status: "in_progress", ownerState: "active", dependenciesBlocked: true, resolveAtClaim: true },
+    { status: "in_progress", ownerState: "active", dependenciesBlocked: true, resolveAtClaim: true, sameAgent: true },
+  ])("prioritizes eligible native owners and preserves input ($status/$ownerState/blocked=$dependenciesBlocked/same=$sameAgent/race=$blockAtClaim/resolve=$resolveAtClaim)", async ({ status, ownerState, dependenciesBlocked = false, sameAgent = false, blockAtClaim = false, resolveAtClaim = false }) => {
     const { companyId, agentId } = await seedCompanyAndAgent();
     const { companyId: otherCompanyId } = await seedCompanyAndAgent();
     const nextAgentId = randomUUID();
@@ -1135,12 +1137,13 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
         summary: "Handoff priority fixture", provider: "test", model: "test-model" };
     });
     const originalTransaction = db.transaction.bind(db);
-    const promotionRace = blockAtClaim ? vi.spyOn(db, "transaction").mockImplementation(async (...args) => {
+    const promotionRace = blockAtClaim || resolveAtClaim ? vi.spyOn(db, "transaction").mockImplementation(async (...args) => {
       const result = await originalTransaction(...args);
       if ((result as { kind?: string } | undefined)?.kind === "promoted") {
         promotionRace!.mockRestore();
-        // A real dependency commit lands after promotion commits, before claim.
-        await addBlocker();
+        // A real dependency change lands after promotion commits, before claim.
+        if (resolveAtClaim) await db.update(issues).set({ status: "done" }).where(eq(issues.id, blockerId));
+        else await addBlocker();
       }
       return result;
     }) : null;
@@ -1176,9 +1179,9 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       if (dependenciesBlocked) {
         expect(promoted?.contextSnapshot).toMatchObject({
           wakeReason: "issue_commented", wakeCommentIds: commentIds,
-          dependencyBlockedInteraction: true, unresolvedBlockerCount: 1,
-          unresolvedBlockerIssueIds: [blockerId],
-          unresolvedBlockerSummaries: [expect.objectContaining({ id: blockerId })],
+          dependencyBlockedInteraction: !resolveAtClaim, unresolvedBlockerCount: resolveAtClaim ? 0 : 1,
+          unresolvedBlockerIssueIds: resolveAtClaim ? [] : [blockerId],
+          unresolvedBlockerSummaries: resolveAtClaim ? [] : [expect.objectContaining({ id: blockerId })],
         });
         const issueRuns = await db.select().from(heartbeatRuns);
         const ownerRuns = issueRuns.filter((row) => row.wakeupRequestId === ownerWakeId);

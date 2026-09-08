@@ -12460,14 +12460,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         logger.info({ runId: run.id, issueId, unresolvedBlockerCount }, "claimQueuedRun: cancelled blocked queued run");
         return null;
       }
-      if (unresolvedBlockerCount > 0 && readiness) {
+      if (readiness) {
         dependencyInteractionContext = {
-          dependencyBlockedInteraction: true,
+          dependencyBlockedInteraction: unresolvedBlockerCount > 0,
           unresolvedBlockerIssueIds: readiness.unresolvedBlockerIssueIds,
           unresolvedBlockerCount: readiness.unresolvedBlockerCount,
-          unresolvedBlockerSummaries: await listUnresolvedBlockerSummaries(
-            db, run.companyId, issueId, readiness.unresolvedBlockerIssueIds,
-          ),
+          unresolvedBlockerSummaries: unresolvedBlockerCount > 0
+            ? await listUnresolvedBlockerSummaries(db, run.companyId, issueId, readiness.unresolvedBlockerIssueIds)
+            : [],
         };
         Object.assign(context, dependencyInteractionContext);
       }
