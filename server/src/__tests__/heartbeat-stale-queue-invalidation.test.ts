@@ -1479,7 +1479,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect(countExecuteCallsForRun(runId)).toBe(0);
   });
 
-  it.each(["human", "malformed", "malformed_saved_reviewer"])("rechecks native ownership after retry promotion (%s)", async (change) => {
+  it.each(["human", "malformed", "malformed_saved_reviewer", "claim_human", "claim_malformed", "claim_next_reviewer"])("rechecks native ownership after retry promotion (%s)", async (change) => {
     const { companyId, agentId } = await seedCompanyAndAgent();
     const developerId = randomUUID(), issueId = randomUUID(), stageId = randomUUID();
     await db.insert(agents).values({
@@ -1496,7 +1496,8 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       assigneeAgentId: change === "malformed_saved_reviewer" ? agentId : developerId,
       executionPolicy: { mode: "auto", commentRequired: true, stages: [{
         id: stageId, type: "review", approvalsNeeded: 1,
-        participants: [{ id: randomUUID(), type: "agent", agentId }],
+        participants: [{ id: randomUUID(), type: "agent", agentId },
+          { id: randomUUID(), type: "agent", agentId: developerId }],
       }] }, executionState: state,
     });
     const { runId } = await seedQueuedRun({ companyId, agentId, issueId,
@@ -1506,14 +1507,36 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       .where(eq(heartbeatRuns.id, runId));
     expect(await heartbeat.promoteDueScheduledRetries(due)).toEqual({ promoted: 1, runIds: [runId] });
     expect(countExecuteCallsForRun(runId)).toBe(0);
-    await db.update(issues).set(change === "human"
+    const mutateOwnership = () => db.update(issues).set(change.endsWith("human")
       ? { assigneeUserId: "local-board" }
-      : { executionState: { ...state, currentStageId: randomUUID() } }).where(eq(issues.id, issueId));
-    await heartbeat.resumeQueuedRuns();
-    expect(await waitForCondition(async () =>
-      (await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId)))[0]?.status === "cancelled",
-    )).toBe(true);
-    expect(countExecuteCallsForRun(runId)).toBe(0);
+      : { executionState: change === "claim_next_reviewer"
+        ? { ...state, currentParticipant: { type: "agent", agentId: developerId } }
+        : { ...state, currentStageId: randomUUID() } }).where(eq(issues.id, issueId));
+    const originalTransaction = db.transaction.bind(db);
+    let injectedDuringClaim = false;
+    const claimRace = change.startsWith("claim_")
+      ? vi.spyOn(db, "transaction").mockImplementation(async (...args) => {
+        const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+        if (run?.status === "running" && !injectedDuringClaim) {
+          injectedDuringClaim = true;
+          // The unlocked staleness read and queued -> running update have finished.
+          // Commit a real ownership mutation before the lazy issue-row lock read.
+          await mutateOwnership();
+        }
+        return originalTransaction(...args);
+      }) : null;
+    try {
+      if (!claimRace) await mutateOwnership();
+      await heartbeat.resumeQueuedRuns();
+      expect(await waitForCondition(async () =>
+        (await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId)))[0]?.status === "cancelled",
+      )).toBe(true);
+      if (claimRace) expect(injectedDuringClaim).toBe(true);
+      expect(countExecuteCallsForRun(runId)).toBe(0);
+      expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0]?.executionRunId).not.toBe(runId);
+    } finally {
+      claimRace?.mockRestore();
+    }
   });
 
   it("cancels queued in_review runs when the current participant changes before the run starts", async () => {

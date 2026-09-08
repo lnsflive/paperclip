@@ -298,15 +298,23 @@ describeEmbeddedPostgres("issue monitor scheduler", () => {
       permissions: {},
     });
     seededAgentIds.add(participantAgentId);
-    const monitorState = await db
-      .select({ executionState: issues.executionState })
+    const monitorIssue = await db
+      .select({ executionState: issues.executionState, executionPolicy: issues.executionPolicy })
       .from(issues)
       .where(eq(issues.id, issueId))
-      .then((rows) => parseIssueExecutionState(rows[0]?.executionState ?? null)?.monitor ?? null);
+      .then((rows) => rows[0]!);
+    const monitorState = parseIssueExecutionState(monitorIssue.executionState)?.monitor ?? null;
+    const stageId = randomUUID();
     await db.update(issues).set({
+      executionPolicy: {
+        ...monitorIssue.executionPolicy,
+        mode: "auto", commentRequired: true,
+        stages: [{ id: stageId, type: "review", approvalsNeeded: 1,
+          participants: [{ id: randomUUID(), type: "agent", agentId: participantAgentId }] }],
+      },
       executionState: {
         status: "pending",
-        currentStageId: randomUUID(),
+        currentStageId: stageId,
         currentStageIndex: 0,
         currentStageType: "review",
         currentParticipant: { type: "agent", agentId: participantAgentId, userId: null },

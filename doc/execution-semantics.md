@@ -387,6 +387,11 @@ remain unchanged.
 Claim revalidates the typed owner after retry promotion too: a human handoff or
 inconsistent review stage invalidates queued ownership-bound work before adapter
 execution. Existing explicitly comment-driven interaction exceptions remain intact.
+The locked registration read repeats that validation: if ownership changes after
+the unlocked preflight and the run's running transition, the claim is cancelled
+and never dispatched to an adapter. A native review-participant transition is
+reported as `issue_review_participant_changed`, not a saved-developer reassignment;
+a human assignment remains an ownership change.
 Permitted blocked interactions carry current unresolved-blocker context for the
 adapter's bounded-interaction instructions. If dependencies change before claim,
 cancelled assignment runs release and promote deferred work after leaving the

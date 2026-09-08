@@ -10770,10 +10770,15 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     });
     if (recordedOwnerId !== run.agentId) {
       if (!isNonAssigneeWorkspaceBusyRetry(retryReason, contextSnapshot)) {
-        // Preserve the route's existing error contract: when assignment still
-        // matches, it is the native review participant that changed, not assignee.
+        // Native execution belongs to the participant, not the saved developer.
+        // A stage change must keep its review-specific disposition even when
+        // the retry agent never was the persisted assignee.
         const reviewParticipantChanged = issue.status === "in_review"
-          && !issue.assigneeUserId && issue.assigneeAgentId === run.agentId;
+          && !issue.assigneeUserId && Boolean(
+            normalizeIssueExecutionPolicy(issue.executionPolicy)?.stages.length
+            || parseIssueExecutionState(issue.executionState)?.currentStageId
+            || parseIssueExecutionState(issue.executionState)?.currentParticipant
+          );
         return {
           allowed: false,
           reason: reviewParticipantChanged
@@ -12546,15 +12551,20 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const claimedWakeReason = readNonEmptyString(claimedContext.wakeReason);
     if (claimedIssueId && claimedWakeReason !== "source_scoped_recovery_action") {
       const claimedAgent = await getAgent(claimed.agentId);
-      await db.transaction(async (tx) => {
+      const lockedStaleness = await db.transaction(async (tx): Promise<QueuedRunStaleness> => {
         const currentIssue = await tx.select().from(issues)
           .where(and(eq(issues.id, claimedIssueId), eq(issues.companyId, claimed.companyId)))
           .for("update").then((rows) => rows[0] ?? null);
+        // Ownership may change after the unlocked preflight and running CAS.
+        // Reuse the full gate, including authorized comment/interaction exceptions,
+        // against the locked row; an invalid claim must never reach the adapter.
+        const staleness = await evaluateQueuedRunStaleness(claimed, claimedIssueId, claimedContext, currentIssue);
+        if (staleness.stale) return staleness;
         if (!currentIssue || recordedIssueExecutionAgent({
           ...currentIssue,
           executionPolicy: normalizeIssueExecutionPolicy(currentIssue.executionPolicy),
           executionState: parseIssueExecutionState(currentIssue.executionState),
-        }) !== claimed.agentId) return;
+        }) !== claimed.agentId) return { stale: false };
         await tx
           .update(issues)
           .set({
@@ -12572,7 +12582,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               or(isNull(issues.executionRunId), eq(issues.executionRunId, claimed.id)),
             ),
           );
+        return { stale: false };
       });
+      if (lockedStaleness.stale) {
+        await cancelQueuedRunForStaleIssue(claimed, claimedIssueId, lockedStaleness);
+        return null;
+      }
     }
 
     return claimed;
@@ -12656,8 +12671,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     run: typeof heartbeatRuns.$inferSelect,
     issueId: string,
     context: Record<string, unknown>,
+    lockedIssue?: typeof issues.$inferSelect | null,
   ): Promise<QueuedRunStaleness> {
-    const issue = await db
+    const issue = lockedIssue !== undefined ? lockedIssue : await db
       .select({
         id: issues.id,
         status: issues.status,

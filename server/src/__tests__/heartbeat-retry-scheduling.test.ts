@@ -640,7 +640,8 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
       assigneeAgentId: developerId,
       executionPolicy: { mode: "auto", commentRequired: true, stages: [{
         id: stageId, type: "review", approvalsNeeded: 1,
-        participants: [{ id: randomUUID(), type: "agent", agentId }],
+        participants: [{ id: randomUUID(), type: "agent", agentId },
+          { id: randomUUID(), type: "agent", agentId: developerId }],
       }] },
       executionState: state,
     }).where(eq(issues.id, issueId));
@@ -688,7 +689,8 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
       ? { promoted: 1, runIds: [scheduled.run.id] } : { promoted: 0, runIds: [] });
     expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, scheduled.run.id)))[0])
       .toMatchObject(disposition === "current"
-        ? { status: "queued", agentId } : { status: "cancelled", errorCode: "issue_reassigned" });
+        ? { status: "queued", agentId } : { status: "cancelled", errorCode: disposition === "human"
+          ? "issue_reassigned" : "issue_review_participant_changed" });
     expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0]?.assigneeAgentId).toBe(developerId);
   });
 
