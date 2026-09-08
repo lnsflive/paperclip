@@ -13,7 +13,9 @@ import {
   issueComments,
   issueDocuments,
   issueRelations,
+  issueTreeHolds,
   issues,
+  routines,
 } from "@paperclipai/db";
 import { ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY } from "@paperclipai/shared";
 import {
@@ -1500,6 +1502,19 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
           { id: randomUUID(), type: "agent", agentId: developerId }],
       }] }, executionState: state,
     });
+    if (change.endsWith("deferred_reviewer")) {
+      const routineId = randomUUID(), parentId = randomUUID(), heldIssueId = randomUUID();
+      await db.insert(routines).values({
+        id: routineId, companyId, title: "Reviewer routine", responsibleUserId: "routine-owner",
+      });
+      await db.insert(issues).values([
+        { id: parentId, companyId, title: "Unheld review parent", status: "backlog" },
+        { id: heldIssueId, companyId, title: "Unrelated paused tree", status: "backlog" },
+      ]);
+      await db.insert(issueTreeHolds).values({ companyId, rootIssueId: heldIssueId, mode: "pause" });
+      await db.update(issues).set({ parentId, originKind: "routine_execution", originId: routineId })
+        .where(eq(issues.id, issueId));
+    }
     const { runId } = await seedQueuedRun({ companyId, agentId, issueId,
       wakeReason: "heartbeat_retry", scheduledRetryReason: "transient_failure" });
     const due = new Date();
@@ -1512,7 +1527,10 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       : { executionState: ["claim_next_reviewer", "claim_deferred_reviewer", "preflight_deferred_reviewer"].includes(change)
         ? { ...state, currentParticipant: { type: "agent", agentId: developerId } }
         : { ...state, currentStageId: randomUUID() } }).where(eq(issues.id, issueId));
-    const originalTransaction = db.transaction.bind(db);
+    const claimDb = change.endsWith("deferred_reviewer")
+      ? createDb(tempDb!.connectionString, { maxConnections: 1 }) : db;
+    const claimHeartbeat = claimDb === db ? heartbeat : heartbeatService(claimDb);
+    const originalTransaction = claimDb.transaction.bind(claimDb);
     let injectedDuringClaim = false;
     const deferredWakeId = randomUUID();
     const seedDeferredReviewer = async () => {
@@ -1526,7 +1544,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       });
     };
     const claimRace = change.startsWith("claim_")
-      ? vi.spyOn(db, "transaction").mockImplementation(async (...args) => {
+      ? vi.spyOn(claimDb, "transaction").mockImplementation(async (...args) => {
         const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
         if (run?.status === "running" && !injectedDuringClaim) {
           injectedDuringClaim = true;
@@ -1539,10 +1557,19 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
         }
         return originalTransaction(...args);
       }) : null;
+    let dispatch: Promise<unknown> | undefined;
+    let deadline: ReturnType<typeof setTimeout> | undefined;
     try {
       if (!claimRace) await mutateOwnership();
       if (change === "preflight_deferred_reviewer") await seedDeferredReviewer();
-      await heartbeat.resumeQueuedRuns();
+      dispatch = claimHeartbeat.resumeQueuedRuns();
+      await Promise.race([
+        dispatch,
+        new Promise<never>((_, reject) => {
+          deadline = setTimeout(() => reject(new Error("Stale-claim deferred promotion stalled")), 4_000);
+        }),
+      ]);
+      clearTimeout(deadline);
       expect(await waitForCondition(async () =>
         (await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId)))[0]?.status === "cancelled",
       )).toBe(true);
@@ -1554,9 +1581,25 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
           const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, deferredWakeId));
           return Boolean(wake?.runId && countExecuteCallsForRun(wake.runId) === 1);
         })).toBe(true);
+        await Promise.race([
+          claimHeartbeat.drainActiveRunExecutions(),
+          new Promise<never>((_, reject) => {
+            deadline = setTimeout(() => reject(new Error("Promoted reviewer finalization stalled")), 4_000);
+          }),
+        ]);
+        const [promotedWake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, deferredWakeId));
+        const [promotedRun] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, promotedWake.runId!));
+        expect(promotedRun?.status).toBe("succeeded");
+        // A claimed run already has attribution; preflight cancellation has none,
+        // so the deferred routine supplies its owner only in the latter case.
+        expect(promotedRun?.responsibleUserId).toBe(change === "claim_deferred_reviewer"
+          ? "responsible-user" : "routine-owner");
       }
     } finally {
+      clearTimeout(deadline);
       claimRace?.mockRestore();
+      if (claimDb !== db) await claimDb.$client.end({ timeout: 0 });
+      await dispatch?.catch(() => {});
     }
   });
 

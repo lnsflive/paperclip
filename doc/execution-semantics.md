@@ -399,6 +399,9 @@ through its own transaction. This preserves attribution precedence while avoidin
 a second connection during run finalization's follow-up enqueue.
 Both preflight and locked stale-claim cancellation promote deferred input after
 releasing the agent-start lock; the next owner need not wait for a periodic backstop.
+Promotion's session, routine attribution and subtree-pause ancestor reads use the
+same locked transaction as the deferred wake. The one-connection handoff contract
+includes these reads and the promoted adapter's finalization, not only claim admission.
 Permitted blocked interactions carry current unresolved-blocker context for the
 adapter's bounded-interaction instructions. If dependencies change before claim,
 cancelled assignment runs release and promote deferred work after leaving the
