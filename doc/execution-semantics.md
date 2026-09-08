@@ -350,6 +350,17 @@ If the committed update assigns the issue to a user, clears the agent assignee, 
 
 Plain text is not assignment. Writing an agent's name, role, or team label in a comment does not change ownership and does not create an agent wake. Agent routing from comment text requires a structured agent mention that resolves inside the company, an explicit `assigneeAgentId` mutation, or an existing current agent assignee receiving normal issue-thread feedback.
 
+When a run releases an issue with multiple deferred wakes, promotion prefers the
+recorded next agent owner: the assignee for `todo`/`in_progress`, or the pending
+typed participant of a matching configured `in_review` stage. Human-owned,
+blocked, parked, terminal, and stage-less review issues retain FIFO ordering.
+Other deferred comments and mentions are retained with their original payloads
+and timestamps, not acknowledged or discarded. Within each priority class,
+request time and then wake id determine order. This preference neither changes
+assignment nor bypasses invokability, pause, dependency, budget, or dispatch
+staleness checks. It prevents an old executor's comment follow-up from taking
+the issue slot ahead of an already queued native handoff.
+
 Pause and tree-control previews should make the same distinction visible. They should report whether the affected subtree contains live running work, queued wakes, agent-owned work, or only human-owned/static issues, so a pause after a handoff does not look like it interrupted agent execution when no agent execution path existed.
 
 ### Adapter-backed workspace coherence

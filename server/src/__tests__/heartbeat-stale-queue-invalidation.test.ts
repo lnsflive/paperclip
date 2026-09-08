@@ -1047,6 +1047,114 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect(promotedRun?.agentId).toBe(peerAgentId);
   });
 
+  it.each([
+    { status: "in_progress", ownerState: "active" },
+    { status: "in_review", ownerState: "active" },
+    { status: "in_progress", ownerState: "paused" },
+    { status: "in_progress", ownerState: "terminated" },
+    { status: "in_progress", ownerState: "foreign-company" },
+  ])("prioritizes eligible native owners and preserves input ($status/$ownerState)", async ({ status, ownerState }) => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const { companyId: otherCompanyId } = await seedCompanyAndAgent();
+    const nextAgentId = randomUUID();
+    const issueId = randomUUID();
+    const oldWakeId = randomUUID();
+    const ownerWakeId = randomUUID();
+    const foreignWakeId = randomUUID();
+    const stageId = randomUUID();
+    const ownerEligible = ownerState === "active";
+    await db.insert(agents).values({
+      id: nextAgentId, companyId: ownerState === "foreign-company" ? otherCompanyId : companyId,
+      name: "NextOwner", role: "engineer",
+      status: ownerState === "foreign-company" ? "active" : ownerState,
+      adapterType: "codex_local", adapterConfig: {},
+      runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } },
+      permissions: {},
+    });
+    const { runId } = await seedQueuedRun({ companyId, agentId, issueId, wakeReason: "issue_assigned" });
+    await db.insert(issues).values({
+      id: issueId, companyId, title: "Native handoff priority", status,
+      assigneeAgentId: nextAgentId, executionRunId: runId,
+      executionPolicy: {
+        mode: "auto", commentRequired: true,
+        stages: [{ id: stageId, type: "review", approvalsNeeded: 1,
+          participants: [{ id: randomUUID(), type: "agent", agentId: nextAgentId }] }],
+      },
+      executionState: {
+        status: status === "in_review" ? "pending" : "changes_requested",
+        currentStageId: stageId, currentStageIndex: 0, currentStageType: "review",
+        currentParticipant: { type: "agent", agentId: nextAgentId },
+        returnAssignee: { type: "agent", agentId }, completedStageIds: [],
+        reviewRequest: null, lastDecisionId: null, lastDecisionOutcome: null,
+      },
+    });
+    const oldRequestedAt = new Date("2026-01-01T00:00:00Z");
+    const oldPayload = {
+      issueId,
+      _paperclipWakeContext: {
+        issueId, wakeReason: "issue_commented", wakeCommentIds: [randomUUID(), randomUUID()],
+      },
+    };
+    await db.insert(agentWakeupRequests).values([
+      // Even an earlier preferred-agent wake with this issue ID must be ignored
+      // when the wake itself belongs to another company.
+      { id: foreignWakeId, companyId: otherCompanyId, agentId: nextAgentId,
+        source: "assignment", triggerDetail: "system",
+        reason: "issue_execution_deferred", status: "deferred_issue_execution",
+        requestedAt: new Date("2025-12-31T23:59:00Z"), payload: { issueId } },
+      { id: oldWakeId, companyId, agentId, source: "comment", triggerDetail: "system",
+        reason: "issue_execution_deferred", status: "deferred_issue_execution",
+        requestedAt: oldRequestedAt, payload: oldPayload },
+      { id: ownerWakeId, companyId, agentId: nextAgentId, source: "assignment", triggerDetail: "system",
+        reason: "issue_execution_deferred", status: "deferred_issue_execution",
+        requestedAt: new Date("2026-01-01T00:01:00Z"),
+        payload: { issueId, _paperclipWakeContext: { issueId, wakeReason: "issue_assigned" } } },
+    ]);
+    let releaseAdapter!: () => void;
+    const adapterGate = new Promise<void>((resolve) => { releaseAdapter = resolve; });
+    mockAdapterExecute.mockImplementation(async () => {
+      await adapterGate;
+      return { exitCode: 0, signal: null, timedOut: false, errorMessage: null,
+        summary: "Handoff priority fixture", provider: "test", model: "test-model" };
+    });
+    try {
+      // Only a seeded, process-free run in this isolated test database is cancelled.
+      await heartbeat.cancelRun(runId, "Fixture holder finished");
+      const [ownerWake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, ownerWakeId));
+      const [oldWake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, oldWakeId));
+      const [foreignWake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, foreignWakeId));
+      expect(foreignWake).toMatchObject({ status: "deferred_issue_execution", runId: null });
+      expect(oldWake).toMatchObject({ payload: oldPayload, requestedAt: oldRequestedAt });
+      if (ownerEligible) {
+        expect(ownerWake?.runId).toBeTruthy();
+        expect(oldWake).toMatchObject({ status: "deferred_issue_execution", runId: null });
+      } else {
+        expect(ownerWake).toMatchObject({ status: "failed", runId: null });
+        expect(ownerWake?.error).toContain("agent is not invokable");
+        expect(oldWake?.runId).toBeTruthy();
+      }
+      const promotedId = ownerEligible ? ownerWake!.runId! : oldWake!.runId!;
+      const [promoted] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, promotedId));
+      expect(promoted?.agentId).toBe(ownerEligible ? nextAgentId : agentId);
+      const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
+      expect(issue?.assigneeAgentId).toBe(nextAgentId);
+      expect(issue?.executionRunId).toBe(ownerEligible ? promoted?.id : null);
+      expect(await waitForCondition(async () => countExecuteCallsForRun(promoted!.id) === 1)).toBe(true);
+      await db.insert(issueComments).values({
+        companyId, issueId, authorAgentId: promoted!.agentId, createdByRunId: promoted!.id,
+        body: "Fixture handoff recorded; no missing-comment recovery is required.",
+      });
+    } finally {
+      // Prevent fixture-only successful-run recovery while letting both inputs drain.
+      await db.update(issues).set({ status: "done", executionState: null }).where(eq(issues.id, issueId));
+      releaseAdapter();
+    }
+    expect(await waitForCondition(async () => {
+      const [oldWake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, oldWakeId));
+      return Boolean(oldWake?.runId);
+    }, 5_000)).toBe(true);
+  }, 15_000);
+
   it("cancels queued runs when the issue assignee changes before the run starts", async () => {
     const { companyId, agentId } = await seedCompanyAndAgent({ agentName: "OriginalCoder" });
     const replacementAgentId = randomUUID();

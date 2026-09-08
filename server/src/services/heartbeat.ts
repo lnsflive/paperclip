@@ -80,6 +80,7 @@ import {
 // git-credentials module became its canonical home; existing importers keep working.
 export { scrubGitCredentialText };
 import { publishLiveEvent } from "./live-events.js";
+import { preferredDeferredIssueWakeAgent } from "./deferred-issue-wake-priority.js";
 import { normalizeResponsibleUserDenialCode } from "./responsible-user-denial-run-outcomes.js";
 import { getRunLogStore, type RunLogHandle } from "./run-log-store.js";
 import { getServerAdapter, listAdapterModelProfiles, runningProcesses } from "../adapters/index.js";
@@ -16505,6 +16506,17 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
 
       while (true) {
+        // The issue row is locked above. Honor its current owner before an
+        // older comment follow-up belonging to the executor that just handed
+        // work back. Keep every deferred input and its original timestamp;
+        // this changes dispatch order, not consumption or authorization.
+        const preferredAgentId = preferredDeferredIssueWakeAgent({
+          status: issue.status,
+          assigneeAgentId: issue.assigneeAgentId,
+          assigneeUserId: issue.assigneeUserId,
+          executionPolicy: normalizeIssueExecutionPolicy(issue.executionPolicy),
+          executionState: parseIssueExecutionState(issue.executionState),
+        });
         const deferred = await tx
           .select()
           .from(agentWakeupRequests)
@@ -16515,7 +16527,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               sql`${agentWakeupRequests.payload} ->> 'issueId' = ${issue.id}`,
             ),
           )
-          .orderBy(asc(agentWakeupRequests.requestedAt))
+          .orderBy(
+            sql`case when ${agentWakeupRequests.agentId} = ${preferredAgentId} then 0 else 1 end`,
+            asc(agentWakeupRequests.requestedAt),
+            asc(agentWakeupRequests.id),
+          )
           .limit(1)
           .then((rows) => rows[0] ?? null);
 
