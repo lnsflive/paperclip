@@ -209,7 +209,7 @@ export function buildContinuationSummaryMarkdown(input: {
 }
 
 export async function getIssueContinuationSummaryDocument(
-  db: Db,
+  db: Pick<Db, "select">,
   issueId: string,
 ): Promise<IssueContinuationSummaryDocument | null> {
   const row = await db

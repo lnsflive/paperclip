@@ -7068,8 +7068,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       .then((rows) => rows[0] ?? null);
   }
 
-  async function getIssueExecutionContext(companyId: string, issueId: string) {
-    return db
+  async function getIssueExecutionContext(companyId: string, issueId: string, queryDb: Pick<Db, "select"> = db) {
+    return queryDb
       .select({
         id: issues.id,
         identifier: issues.identifier,
@@ -7151,13 +7151,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   async function getRoutineEnvForExecutionIssue(
     companyId: string,
     issueContext: Awaited<ReturnType<typeof getIssueExecutionContext>> | null,
+    queryDb: Pick<Db, "select"> = db,
   ) {
     if (!issueContext || issueContext.originKind !== "routine_execution" || !issueContext.originId) {
       return { routineId: null, env: null, responsibleUserId: null };
     }
 
     const routineRun = issueContext.originRunId
-      ? await db
+      ? await queryDb
           .select({
             routineRevisionId: routineRuns.routineRevisionId,
             responsibleUserId: routineRuns.responsibleUserId,
@@ -7174,7 +7175,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       : null;
 
     if (routineRun?.routineRevisionId) {
-      const revision = await db
+      const revision = await queryDb
         .select({
           snapshot: routineRevisions.snapshot,
           responsibleUserId: routineRevisions.responsibleUserId,
@@ -7198,7 +7199,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       }
     }
 
-    const routine = await db
+    const routine = await queryDb
       .select({ env: routines.env, responsibleUserId: routines.responsibleUserId })
       .from(routines)
       .where(and(eq(routines.id, issueContext.originId), eq(routines.companyId, companyId)))
@@ -7210,8 +7211,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     };
   }
 
-  async function resolveCompanyDefaultResponsibleUserId(companyId: string) {
-    const company = await db
+  async function resolveCompanyDefaultResponsibleUserId(companyId: string, queryDb: Pick<Db, "select"> = db) {
+    const company = await queryDb
       .select({ defaultResponsibleUserId: companies.defaultResponsibleUserId })
       .from(companies)
       .where(eq(companies.id, companyId))
@@ -7219,7 +7220,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const explicitDefault = readNonEmptyString(company?.defaultResponsibleUserId);
     if (explicitDefault) return explicitDefault;
 
-    const owner = await db
+    const owner = await queryDb
       .select({ userId: companyMemberships.principalId })
       .from(companyMemberships)
       .where(
@@ -7235,7 +7236,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       .then((rows) => rows[0] ?? null);
     if (owner?.userId) return owner.userId;
 
-    const firstUser = await db
+    const firstUser = await queryDb
       .select({ userId: companyMemberships.principalId })
       .from(companyMemberships)
       .where(
@@ -7251,9 +7252,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     return firstUser?.userId ?? null;
   }
 
-  async function resolveParentIssueResponsibleUserId(companyId: string, parentId: string | null | undefined) {
+  async function resolveParentIssueResponsibleUserId(
+    companyId: string,
+    parentId: string | null | undefined,
+    queryDb: Pick<Db, "select"> = db,
+  ) {
     if (!parentId) return null;
-    const parent = await db
+    const parent = await queryDb
       .select({
         responsibleUserId: issues.responsibleUserId,
         createdByUserId: issues.createdByUserId,
@@ -7286,7 +7291,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     source?: WakeupOptions["source"] | null;
     triggerDetail?: WakeupOptions["triggerDetail"] | null;
     existingRunResponsibleUserId?: string | null;
-  }) {
+  }, queryDb: Pick<Db, "select"> = db) {
     const contextResponsibleUserId = readNonEmptyString(input.contextSnapshot.responsibleUserId);
     const requestedUserId = input.requestedByActorType === "user"
       ? readNonEmptyString(input.requestedByActorId)
@@ -7296,11 +7301,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     if (input.routineEnvContext.responsibleUserId) return input.routineEnvContext.responsibleUserId;
     if (isManualUserRun(input) && requestedUserId) return requestedUserId;
     if (input.issueContext?.responsibleUserId) return input.issueContext.responsibleUserId;
-    const parentResponsibleUserId = await resolveParentIssueResponsibleUserId(input.companyId, input.issueContext?.parentId);
+    const parentResponsibleUserId = await resolveParentIssueResponsibleUserId(input.companyId, input.issueContext?.parentId, queryDb);
     if (parentResponsibleUserId) return parentResponsibleUserId;
-    if (input.issueContext) return resolveCompanyDefaultResponsibleUserId(input.companyId);
+    if (input.issueContext) return resolveCompanyDefaultResponsibleUserId(input.companyId, queryDb);
     if (requestedUserId) return requestedUserId;
-    return resolveCompanyDefaultResponsibleUserId(input.companyId);
+    return resolveCompanyDefaultResponsibleUserId(input.companyId, queryDb);
   }
 
   async function resolveResponsibleUserIdForRun(input: {
@@ -12493,7 +12498,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
       const staleness = await evaluateQueuedRunStaleness(run, issueId, context);
       if (staleness.stale) {
-        await cancelQueuedRunForStaleIssue(run, issueId, staleness);
+        const cancelled = await cancelQueuedRunForStaleIssue(run, issueId, staleness);
+        if (cancelled) {
+          if (dependencyReleasesAfterStartLock) dependencyReleasesAfterStartLock.push(cancelled);
+          else await releaseIssueExecutionAndPromote(cancelled, { suppressImmediateRecovery: true });
+        }
         logger.info(
           { runId: run.id, issueId, errorCode: staleness.errorCode },
           "claimQueuedRun: cancelled stale queued run",
@@ -12558,7 +12567,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         // Ownership may change after the unlocked preflight and running CAS.
         // Reuse the full gate, including authorized comment/interaction exceptions,
         // against the locked row; an invalid claim must never reach the adapter.
-        const staleness = await evaluateQueuedRunStaleness(claimed, claimedIssueId, claimedContext, currentIssue);
+        const staleness = await evaluateQueuedRunStaleness(claimed, claimedIssueId, claimedContext, currentIssue, tx);
         if (staleness.stale) return staleness;
         if (!currentIssue || recordedIssueExecutionAgent({
           ...currentIssue,
@@ -12585,7 +12594,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         return { stale: false };
       });
       if (lockedStaleness.stale) {
-        await cancelQueuedRunForStaleIssue(claimed, claimedIssueId, lockedStaleness);
+        const cancelled = await cancelQueuedRunForStaleIssue(claimed, claimedIssueId, lockedStaleness);
+        if (cancelled) {
+          if (dependencyReleasesAfterStartLock) dependencyReleasesAfterStartLock.push(cancelled);
+          else await releaseIssueExecutionAndPromote(cancelled, { suppressImmediateRecovery: true });
+        }
         return null;
       }
     }
@@ -12672,8 +12685,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     issueId: string,
     context: Record<string, unknown>,
     lockedIssue?: typeof issues.$inferSelect | null,
+    queryDb: Pick<Db, "select"> = db,
   ): Promise<QueuedRunStaleness> {
-    const issue = lockedIssue !== undefined ? lockedIssue : await db
+    const issue = lockedIssue !== undefined ? lockedIssue : await queryDb
       .select({
         id: issues.id,
         status: issues.status,
@@ -12716,7 +12730,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         readNonEmptyString(parseObject(queuedWake.continuationSummary).body);
       const currentContinuationSummary = queuedContinuationSummary
         ? null
-        : await getIssueContinuationSummaryDocument(db, issueId);
+        : await getIssueContinuationSummaryDocument(queryDb, issueId);
       const continuationSummaryBody = queuedContinuationSummary ?? currentContinuationSummary?.body ?? null;
       if (continuationSummaryParksExecutor(continuationSummaryBody)) {
         return {
@@ -17418,10 +17432,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       ? (await instanceSettings.getExperimental()).enableIsolatedWorkspaces
       : false;
     let queuedResponsibleUserIdPromise: Promise<string> | null = null;
-    const resolveQueuedResponsibleUserId = () => {
+    const resolveQueuedResponsibleUserId = (queryDb: Pick<Db, "select">) => {
       queuedResponsibleUserIdPromise ??= (async () => {
-        const queuedIssueContext = issueId ? await getIssueExecutionContext(agent.companyId, issueId) : null;
-        const queuedRoutineEnvContext = await getRoutineEnvForExecutionIssue(agent.companyId, queuedIssueContext);
+        const queuedIssueContext = issueId ? await getIssueExecutionContext(agent.companyId, issueId, queryDb) : null;
+        const queuedRoutineEnvContext = await getRoutineEnvForExecutionIssue(agent.companyId, queuedIssueContext, queryDb);
         const queuedResponsibleUserId = await resolveResponsibleUserIdForRunSeed({
           companyId: agent.companyId,
           contextSnapshot: enrichedContextSnapshot,
@@ -17431,7 +17445,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           requestedByActorId: opts.requestedByActorId ?? null,
           source,
           triggerDetail,
-        });
+        }, queryDb);
         if (!queuedResponsibleUserId) {
           throw new HttpError(422, "Unable to resolve responsible user for heartbeat run dispatch", {
             code: "responsible_user_unresolved",
@@ -18306,7 +18320,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             invocationSource: source,
             triggerDetail,
             status: "queued",
-            responsibleUserId: await resolveQueuedResponsibleUserId(),
+            responsibleUserId: await resolveQueuedResponsibleUserId(tx),
             wakeupRequestId: wakeupRequest.id,
             contextSnapshot: enrichedContextSnapshot,
             sessionIdBefore: sessionBefore,
@@ -18480,7 +18494,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           invocationSource: source,
           triggerDetail,
           status: "queued",
-          responsibleUserId: await resolveQueuedResponsibleUserId(),
+          responsibleUserId: await resolveQueuedResponsibleUserId(tx),
           wakeupRequestId: wakeupRequest.id,
           contextSnapshot: enrichedContextSnapshot,
           sessionIdBefore: sessionBefore,

@@ -1479,7 +1479,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect(countExecuteCallsForRun(runId)).toBe(0);
   });
 
-  it.each(["human", "malformed", "malformed_saved_reviewer", "claim_human", "claim_malformed", "claim_next_reviewer"])("rechecks native ownership after retry promotion (%s)", async (change) => {
+  it.each(["human", "malformed", "malformed_saved_reviewer", "claim_human", "claim_malformed", "claim_next_reviewer", "claim_deferred_reviewer", "preflight_deferred_reviewer"])("rechecks native ownership after retry promotion (%s)", async (change) => {
     const { companyId, agentId } = await seedCompanyAndAgent();
     const developerId = randomUUID(), issueId = randomUUID(), stageId = randomUUID();
     await db.insert(agents).values({
@@ -1509,11 +1509,22 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect(countExecuteCallsForRun(runId)).toBe(0);
     const mutateOwnership = () => db.update(issues).set(change.endsWith("human")
       ? { assigneeUserId: "local-board" }
-      : { executionState: change === "claim_next_reviewer"
+      : { executionState: ["claim_next_reviewer", "claim_deferred_reviewer", "preflight_deferred_reviewer"].includes(change)
         ? { ...state, currentParticipant: { type: "agent", agentId: developerId } }
         : { ...state, currentStageId: randomUUID() } }).where(eq(issues.id, issueId));
     const originalTransaction = db.transaction.bind(db);
     let injectedDuringClaim = false;
+    const deferredWakeId = randomUUID();
+    const seedDeferredReviewer = async () => {
+      await db.update(issues).set({ executionRunId: runId }).where(eq(issues.id, issueId));
+      await db.insert(agentWakeupRequests).values({
+        id: deferredWakeId, companyId, agentId: developerId,
+        source: "automation", triggerDetail: "system", reason: "issue_execution_deferred",
+        status: "deferred_issue_execution", payload: {
+          issueId, _paperclipWakeContext: { issueId, wakeReason: "execution_review_requested" },
+        },
+      });
+    };
     const claimRace = change.startsWith("claim_")
       ? vi.spyOn(db, "transaction").mockImplementation(async (...args) => {
         const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
@@ -1522,11 +1533,15 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
           // The unlocked staleness read and queued -> running update have finished.
           // Commit a real ownership mutation before the lazy issue-row lock read.
           await mutateOwnership();
+          if (change === "claim_deferred_reviewer") {
+            await seedDeferredReviewer();
+          }
         }
         return originalTransaction(...args);
       }) : null;
     try {
       if (!claimRace) await mutateOwnership();
+      if (change === "preflight_deferred_reviewer") await seedDeferredReviewer();
       await heartbeat.resumeQueuedRuns();
       expect(await waitForCondition(async () =>
         (await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId)))[0]?.status === "cancelled",
@@ -1534,6 +1549,12 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       if (claimRace) expect(injectedDuringClaim).toBe(true);
       expect(countExecuteCallsForRun(runId)).toBe(0);
       expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0]?.executionRunId).not.toBe(runId);
+      if (change.endsWith("deferred_reviewer")) {
+        expect(await waitForCondition(async () => {
+          const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, deferredWakeId));
+          return Boolean(wake?.runId && countExecuteCallsForRun(wake.runId) === 1);
+        })).toBe(true);
+      }
     } finally {
       claimRace?.mockRestore();
     }
@@ -1736,6 +1757,48 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect(run?.errorCode).toBeNull();
     expect(countExecuteCallsForRun(runId)).toBe(1);
   });
+
+  it.each([false, true])("claims continuation with one DB connection (stored summary=%s)", async (hasSummary) => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const issueId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId, companyId, title: "Single-connection continuation", status: "in_progress", assigneeAgentId: agentId,
+    });
+    if (hasSummary) await seedContinuationSummary({
+      companyId, issueId, agentId, body: "## Next Action\n\nImplement the accepted correction and run its regression test.",
+    });
+    const { runId } = await seedQueuedRun({ companyId, agentId, issueId, wakeReason: "issue_continuation_needed" });
+    const singleDb = createDb(tempDb!.connectionString, { maxConnections: 1 });
+    const singleHeartbeat = heartbeatService(singleDb);
+    const dispatch = singleHeartbeat.resumeQueuedRuns();
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    try {
+      expect(await Promise.race([
+        dispatch.then(() => true),
+        new Promise<boolean>((resolve) => { deadline = setTimeout(() => resolve(false), 4_000); }),
+      ])).toBe(true);
+      expect(await waitForCondition(async () => countExecuteCallsForRun(runId) === 1)).toBe(true);
+      clearTimeout(deadline);
+      const drained = await Promise.race([
+        singleHeartbeat.drainActiveRunExecutions().then(() => true),
+        new Promise<boolean>((resolve) => { deadline = setTimeout(() => resolve(false), 4_000); }),
+      ]);
+      if (!drained) {
+        const activity = await db.execute(sql`select state, wait_event_type, wait_event, left(query, 250) as query
+          from pg_stat_activity where datname = current_database() and pid <> pg_backend_pid()`);
+        throw new Error(`Single-connection finalization stalled: ${JSON.stringify(activity)}`);
+      }
+      const [completed] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+      expect(completed?.status).toBe("succeeded");
+      expect(completed?.errorCode).toBeNull();
+      expect(completed?.responsibleUserId).toBeTruthy();
+    } finally {
+      clearTimeout(deadline);
+      // End only this test's one-connection client, also releasing a negative-control deadlock.
+      await singleDb.$client.end({ timeout: 0 });
+      await dispatch.catch(() => {});
+    }
+  }, 15_000);
 
   it("cancels queued continuation recovery when the continuation summary parks executor work for review", async () => {
     const { companyId, agentId } = await seedCompanyAndAgent();

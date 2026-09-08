@@ -392,6 +392,13 @@ the unlocked preflight and the run's running transition, the claim is cancelled
 and never dispatched to an adapter. A native review-participant transition is
 reported as `issue_review_participant_changed`, not a saved-developer reassignment;
 a human assignment remains an ownership change.
+Reads needed for that validation use the claim transaction, including continuation
+documents, so a one-connection pool cannot deadlock on a second connection.
+Wakeup creation likewise resolves issue, routine and responsible-user context
+through its own transaction. This preserves attribution precedence while avoiding
+a second connection during run finalization's follow-up enqueue.
+Both preflight and locked stale-claim cancellation promote deferred input after
+releasing the agent-start lock; the next owner need not wait for a periodic backstop.
 Permitted blocked interactions carry current unresolved-blocker context for the
 adapter's bounded-interaction instructions. If dependencies change before claim,
 cancelled assignment runs release and promote deferred work after leaving the
