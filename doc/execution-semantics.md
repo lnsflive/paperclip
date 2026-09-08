@@ -361,6 +361,13 @@ assignment nor bypasses invokability, pause, dependency, budget, or dispatch
 staleness checks. It prevents an old executor's comment follow-up from taking
 the issue slot ahead of an already queued native handoff.
 
+Before promotion, unresolved dependency gates skip non-interaction wakes and
+continue scanning the deferred queue in the same transaction. This preserves
+permitted comment follow-ups even when the preferred assignment cannot run.
+Skipped wake payloads remain available for audit; normal blocker resolution
+wakes the assignee. The claim-time dependency check remains authoritative if
+dependencies change after promotion.
+
 Pause and tree-control previews should make the same distinction visible. They should report whether the affected subtree contains live running work, queued wakes, agent-owned work, or only human-owned/static issues, so a pause after a handoff does not look like it interrupted agent execution when no agent execution path existed.
 
 ### Adapter-backed workspace coherence

@@ -12,6 +12,7 @@ import {
   heartbeatRuns,
   issueComments,
   issueDocuments,
+  issueRelations,
   issues,
 } from "@paperclipai/db";
 import { ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY } from "@paperclipai/shared";
@@ -1053,7 +1054,10 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     { status: "in_progress", ownerState: "paused" },
     { status: "in_progress", ownerState: "terminated" },
     { status: "in_progress", ownerState: "foreign-company" },
-  ])("prioritizes eligible native owners and preserves input ($status/$ownerState)", async ({ status, ownerState }) => {
+    { status: "in_progress", ownerState: "active", dependenciesBlocked: true },
+    { status: "in_review", ownerState: "active", dependenciesBlocked: true },
+    { status: "in_progress", ownerState: "active", dependenciesBlocked: true, sameAgent: true },
+  ])("prioritizes eligible native owners and preserves input ($status/$ownerState/blocked=$dependenciesBlocked/same=$sameAgent)", async ({ status, ownerState, dependenciesBlocked = false, sameAgent = false }) => {
     const { companyId, agentId } = await seedCompanyAndAgent();
     const { companyId: otherCompanyId } = await seedCompanyAndAgent();
     const nextAgentId = randomUUID();
@@ -1062,7 +1066,8 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     const ownerWakeId = randomUUID();
     const foreignWakeId = randomUUID();
     const stageId = randomUUID();
-    const ownerEligible = ownerState === "active";
+    const ownerEligible = ownerState === "active" && !dependenciesBlocked;
+    const commentAgentId = sameAgent ? nextAgentId : agentId;
     await db.insert(agents).values({
       id: nextAgentId, companyId: ownerState === "foreign-company" ? otherCompanyId : companyId,
       name: "NextOwner", role: "engineer",
@@ -1089,10 +1094,19 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       },
     });
     const oldRequestedAt = new Date("2026-01-01T00:00:00Z");
+    if (dependenciesBlocked) {
+      const blockerId = randomUUID();
+      await db.insert(issues).values({ id: blockerId, companyId, title: "Unresolved dependency", status: "todo" });
+      await db.insert(issueRelations).values({ companyId, issueId: blockerId, relatedIssueId: issueId, type: "blocks" });
+    }
+    const commentIds = [randomUUID(), randomUUID()];
+    await db.insert(issueComments).values(commentIds.map((id) => ({
+      id, companyId, issueId, authorUserId: "responsible-user", body: "Real deferred follow-up input",
+    })));
     const oldPayload = {
       issueId,
       _paperclipWakeContext: {
-        issueId, wakeReason: "issue_commented", wakeCommentIds: [randomUUID(), randomUUID()],
+        issueId, wakeReason: "issue_commented", wakeCommentIds: commentIds,
       },
     };
     await db.insert(agentWakeupRequests).values([
@@ -1102,12 +1116,12 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
         source: "assignment", triggerDetail: "system",
         reason: "issue_execution_deferred", status: "deferred_issue_execution",
         requestedAt: new Date("2025-12-31T23:59:00Z"), payload: { issueId } },
-      { id: oldWakeId, companyId, agentId, source: "comment", triggerDetail: "system",
+      { id: oldWakeId, companyId, agentId: commentAgentId, source: "comment", triggerDetail: "system",
         reason: "issue_execution_deferred", status: "deferred_issue_execution",
         requestedAt: oldRequestedAt, payload: oldPayload },
       { id: ownerWakeId, companyId, agentId: nextAgentId, source: "assignment", triggerDetail: "system",
         reason: "issue_execution_deferred", status: "deferred_issue_execution",
-        requestedAt: new Date("2026-01-01T00:01:00Z"),
+        requestedAt: new Date(sameAgent ? "2025-12-31T23:59:30Z" : "2026-01-01T00:01:00Z"),
         payload: { issueId, _paperclipWakeContext: { issueId, wakeReason: "issue_assigned" } } },
     ]);
     let releaseAdapter!: () => void;
@@ -1128,6 +1142,10 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       if (ownerEligible) {
         expect(ownerWake?.runId).toBeTruthy();
         expect(oldWake).toMatchObject({ status: "deferred_issue_execution", runId: null });
+      } else if (dependenciesBlocked) {
+        expect(ownerWake).toMatchObject({ status: "skipped", runId: null });
+        expect(ownerWake?.error).toContain("dependencies are still blocked");
+        expect(oldWake?.runId).toBeTruthy();
       } else {
         expect(ownerWake).toMatchObject({ status: "failed", runId: null });
         expect(ownerWake?.error).toContain("agent is not invokable");
@@ -1135,11 +1153,16 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       }
       const promotedId = ownerEligible ? ownerWake!.runId! : oldWake!.runId!;
       const [promoted] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, promotedId));
-      expect(promoted?.agentId).toBe(ownerEligible ? nextAgentId : agentId);
+      expect(promoted?.agentId).toBe(ownerEligible ? nextAgentId : commentAgentId);
       const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
       expect(issue?.assigneeAgentId).toBe(nextAgentId);
-      expect(issue?.executionRunId).toBe(ownerEligible ? promoted?.id : null);
+      expect(issue?.executionRunId).toBe(ownerEligible || sameAgent ? promoted?.id : null);
       expect(await waitForCondition(async () => countExecuteCallsForRun(promoted!.id) === 1)).toBe(true);
+      if (dependenciesBlocked) {
+        expect(promoted?.contextSnapshot).toMatchObject({ wakeReason: "issue_commented", wakeCommentIds: commentIds });
+        const issueRuns = await db.select().from(heartbeatRuns);
+        expect(issueRuns.filter((row) => row.wakeupRequestId === ownerWakeId)).toHaveLength(0);
+      }
       await db.insert(issueComments).values({
         companyId, issueId, authorAgentId: promoted!.agentId, createdByRunId: promoted!.id,
         body: "Fixture handoff recorded; no missing-comment recovery is required.",

@@ -16505,6 +16505,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       }
 
 
+      const deferredDependencyReadiness = await issuesSvc.listDependencyReadiness(issue.companyId, [issue.id], tx);
+      const deferredDependenciesBlocked =
+        (deferredDependencyReadiness.get(issue.id)?.unresolvedBlockerCount ?? 0) > 0;
+
       while (true) {
         // The issue row is locked above. Honor its current owner before an
         // older comment follow-up belonging to the executor that just handed
@@ -16703,6 +16707,24 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           triggerDetail: promotedTriggerDetail,
           payload: promotedPayload,
         });
+
+        // Apply the existing claim-time dependency gate before selecting this
+        // wake. Otherwise a preferred assignment can be cancelled at claim time
+        // and strand a permitted comment behind it. Continue in this transaction
+        // instead of recursively acquiring an agent-start lock. Blocker resolution
+        // will wake the assignee normally; retain the skipped input for audit.
+        if (deferredDependenciesBlocked && !allowsIssueInteractionWake(promotedContextSnapshot)) {
+          await tx
+            .update(agentWakeupRequests)
+            .set({
+              status: "skipped",
+              finishedAt: new Date(),
+              error: "Deferred wake skipped because issue dependencies are still blocked; Paperclip will wake the assignee when blockers resolve",
+              updatedAt: new Date(),
+            })
+            .where(eq(agentWakeupRequests.id, deferred.id));
+          continue;
+        }
 
         const sessionBefore =
           readNonEmptyString(promotedContextSnapshot.resumeSessionDisplayId) ??
