@@ -379,6 +379,11 @@ matching pending reviewer is not a stale holder merely because the saved
 developer remains assigned. Context-only developer input does not take the
 reviewer's slot. Ownership is read under the issue row lock before registering
 execution, so cancellation and interrupt surfaces can find the actual reviewer.
+Bounded retry admission/promotion and cancellation of not-yet-due retries use this
+same owner. A saved developer's comment does not discard the pending reviewer's
+retry; a changed, human or inconsistent review owner still invalidates it. Existing
+retry limits, dependency/pause/budget gates and the in-progress-only max-turn policy
+remain unchanged.
 Permitted blocked interactions carry current unresolved-blocker context for the
 adapter's bounded-interaction instructions. If dependencies change before claim,
 cancelled assignment runs release and promote deferred work after leaving the

@@ -10744,6 +10744,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         id: issues.id,
         status: issues.status,
         assigneeAgentId: issues.assigneeAgentId,
+        assigneeUserId: issues.assigneeUserId,
+        executionPolicy: issues.executionPolicy,
         executionRunId: issues.executionRunId,
         executionState: issues.executionState,
       })
@@ -10761,7 +10763,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       };
     }
 
-    if (issue.assigneeAgentId !== run.agentId) {
+    const recordedOwnerId = recordedIssueExecutionAgent({
+      ...issue,
+      executionPolicy: normalizeIssueExecutionPolicy(issue.executionPolicy),
+      executionState: parseIssueExecutionState(issue.executionState),
+    });
+    if (recordedOwnerId !== run.agentId) {
       if (!isNonAssigneeWorkspaceBusyRetry(retryReason, contextSnapshot)) {
         return {
           allowed: false,
@@ -10772,6 +10779,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             issueId,
             previousAssigneeAgentId: run.agentId,
             currentAssigneeAgentId: issue.assigneeAgentId,
+            currentExecutionOwnerAgentId: recordedOwnerId,
           },
         };
       }
@@ -17589,11 +17597,16 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           return { kind: "skipped" as const };
         }
 
+        const executionOwnerId = recordedIssueExecutionAgent({
+          ...issue,
+          executionPolicy: normalizeIssueExecutionPolicy(issue.executionPolicy),
+          executionState: parseIssueExecutionState(issue.executionState),
+        });
         const cancelStaleScheduledRetry = async (scheduledRun: typeof heartbeatRuns.$inferSelect) => {
           const issueCancelled = issue.status === "cancelled";
           if (
             scheduledRun.status !== "scheduled_retry" ||
-            (scheduledRun.agentId === issue.assigneeAgentId && !issueCancelled)
+            (scheduledRun.agentId === executionOwnerId && !issueCancelled)
           ) {
             return false;
           }
@@ -17707,11 +17720,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         // claimed running run. If zero rows matched, leave
         // `activeExecutionRun` populated so the defer path runs
         // normally against the now-running holder.
-        const executionOwnerId = recordedIssueExecutionAgent({
-          ...issue,
-          executionPolicy: normalizeIssueExecutionPolicy(issue.executionPolicy),
-          executionState: parseIssueExecutionState(issue.executionState),
-        });
         if (
           activeExecutionRun &&
           activeExecutionRun.status !== "running" &&

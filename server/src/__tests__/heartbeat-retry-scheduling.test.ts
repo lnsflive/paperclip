@@ -617,6 +617,81 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
     expect(issue?.executionRunId).toBe(scheduled.run.id);
   });
 
+  it.each([
+    { reason: "transient_failure", disposition: "current" },
+    { reason: INTERACTION_CONTINUATION_INFRA_RETRY_REASON, disposition: "current" },
+    { reason: "transient_failure", disposition: "changed" },
+    { reason: "transient_failure", disposition: "malformed" },
+    { reason: "transient_failure", disposition: "human" },
+  ])("uses recorded reviewer ownership throughout retry ($reason/$disposition)", async ({ reason, disposition }) => {
+    const { companyId, agentId, issueId, runId, now } = await seedMaxTurnFixture({ issueStatus: "in_review" });
+    const developerId = randomUUID(), stageId = randomUUID();
+    await db.insert(agents).values({
+      id: developerId, companyId, name: "Saved developer", role: "engineer",
+      status: "active", adapterType: "process", adapterConfig: {},
+      runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } }, permissions: {},
+    });
+    const state = {
+      status: "pending", currentStageId: stageId, currentStageIndex: 0, currentStageType: "review",
+      currentParticipant: { type: "agent", agentId }, returnAssignee: { type: "agent", agentId: developerId },
+      completedStageIds: [], reviewRequest: null, lastDecisionId: null, lastDecisionOutcome: null,
+    };
+    await db.update(issues).set({
+      assigneeAgentId: developerId,
+      executionPolicy: { mode: "auto", commentRequired: true, stages: [{
+        id: stageId, type: "review", approvalsNeeded: 1,
+        participants: [{ id: randomUUID(), type: "agent", agentId }],
+      }] },
+      executionState: state,
+    }).where(eq(issues.id, issueId));
+    await db.update(heartbeatRuns).set({
+      error: reason === "transient_failure" ? "upstream overload" : "workspace validation failed before dispatch",
+      errorCode: reason === "transient_failure" ? "adapter_failed" : "workspace_validation_failed",
+      resultJson: {}, contextSnapshot: {
+        issueId, taskId: issueId, wakeReason: "issue_commented", mutation: "interaction",
+        interactionId: randomUUID(), interactionKind: "request_confirmation", interactionStatus: "accepted",
+      },
+    }).where(eq(heartbeatRuns.id, runId));
+    const scheduled = await heartbeat.scheduleBoundedRetry(runId, {
+      now, random: () => 0.5, retryReason: reason,
+      ...(reason === INTERACTION_CONTINUATION_INFRA_RETRY_REASON
+        ? { wakeReason: INTERACTION_CONTINUATION_INFRA_WAKE_REASON, maxAttempts: 3 } : {}),
+    });
+    expect(scheduled.outcome).toBe("scheduled");
+    if (scheduled.outcome !== "scheduled") return;
+
+    // Keep promotion observable in the queue, without invoking an external adapter.
+    await db.insert(heartbeatRuns).values(Array.from({ length: 5 }, () => ({
+      id: randomUUID(), companyId, agentId, invocationSource: "automation", status: "running",
+      contextSnapshot: { wakeReason: "test_busy_slot" }, startedAt: now,
+    })));
+    if (disposition === "current") {
+      const comment = await heartbeat.wakeup(developerId, {
+        source: "comment", triggerDetail: "system", reason: "issue_commented",
+        payload: { issueId }, contextSnapshot: { issueId, wakeReason: "issue_commented" },
+        requestedByActorType: "user", requestedByActorId: "local-board",
+      });
+      expect(comment).toBeNull();
+      expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, scheduled.run.id)))[0])
+        .toMatchObject({ status: "scheduled_retry", agentId });
+      expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0])
+        .toMatchObject({ assigneeAgentId: developerId, executionRunId: scheduled.run.id });
+    } else {
+      await db.update(issues).set(disposition === "human"
+        ? { assigneeUserId: "local-board" }
+        : { executionState: disposition === "changed"
+          ? { ...state, currentParticipant: { type: "agent", agentId: developerId } }
+          : { ...state, currentStageId: randomUUID() } }).where(eq(issues.id, issueId));
+    }
+    const promotion = await heartbeat.promoteDueScheduledRetries(scheduled.dueAt);
+    expect(promotion).toEqual(disposition === "current"
+      ? { promoted: 1, runIds: [scheduled.run.id] } : { promoted: 0, runIds: [] });
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, scheduled.run.id)))[0])
+      .toMatchObject(disposition === "current"
+        ? { status: "queued", agentId } : { status: "cancelled", errorCode: "issue_reassigned" });
+    expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0]?.assigneeAgentId).toBe(developerId);
+  });
+
   it("coalesces duplicate accepted interaction continuation infra retry schedules", async () => {
     const { issueId, runId, now } = await seedMaxTurnFixture({ issueStatus: "in_review" });
     const interactionId = randomUUID();
