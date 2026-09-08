@@ -384,6 +384,9 @@ same owner. A saved developer's comment does not discard the pending reviewer's
 retry; a changed, human or inconsistent review owner still invalidates it. Existing
 retry limits, dependency/pause/budget gates and the in-progress-only max-turn policy
 remain unchanged.
+Claim revalidates the typed owner after retry promotion too: a human handoff or
+inconsistent review stage invalidates queued ownership-bound work before adapter
+execution. Existing explicitly comment-driven interaction exceptions remain intact.
 Permitted blocked interactions carry current unresolved-blocker context for the
 adapter's bounded-interaction instructions. If dependencies change before claim,
 cancelled assignment runs release and promote deferred work after leaving the

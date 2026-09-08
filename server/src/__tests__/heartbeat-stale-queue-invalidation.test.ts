@@ -1479,6 +1479,43 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect(countExecuteCallsForRun(runId)).toBe(0);
   });
 
+  it.each(["human", "malformed", "malformed_saved_reviewer"])("rechecks native ownership after retry promotion (%s)", async (change) => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const developerId = randomUUID(), issueId = randomUUID(), stageId = randomUUID();
+    await db.insert(agents).values({
+      id: developerId, companyId, name: "Saved developer", role: "engineer", status: "active",
+      adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {},
+    });
+    const state = {
+      status: "pending", currentStageId: stageId, currentStageIndex: 0, currentStageType: "review",
+      currentParticipant: { type: "agent", agentId }, returnAssignee: { type: "agent", agentId: developerId },
+      completedStageIds: [], reviewRequest: null, lastDecisionId: null, lastDecisionOutcome: null,
+    };
+    await db.insert(issues).values({
+      id: issueId, companyId, title: "Promoted reviewer retry", status: "in_review",
+      assigneeAgentId: change === "malformed_saved_reviewer" ? agentId : developerId,
+      executionPolicy: { mode: "auto", commentRequired: true, stages: [{
+        id: stageId, type: "review", approvalsNeeded: 1,
+        participants: [{ id: randomUUID(), type: "agent", agentId }],
+      }] }, executionState: state,
+    });
+    const { runId } = await seedQueuedRun({ companyId, agentId, issueId,
+      wakeReason: "heartbeat_retry", scheduledRetryReason: "transient_failure" });
+    const due = new Date();
+    await db.update(heartbeatRuns).set({ status: "scheduled_retry", scheduledRetryAt: due })
+      .where(eq(heartbeatRuns.id, runId));
+    expect(await heartbeat.promoteDueScheduledRetries(due)).toEqual({ promoted: 1, runIds: [runId] });
+    expect(countExecuteCallsForRun(runId)).toBe(0);
+    await db.update(issues).set(change === "human"
+      ? { assigneeUserId: "local-board" }
+      : { executionState: { ...state, currentStageId: randomUUID() } }).where(eq(issues.id, issueId));
+    await heartbeat.resumeQueuedRuns();
+    expect(await waitForCondition(async () =>
+      (await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId)))[0]?.status === "cancelled",
+    )).toBe(true);
+    expect(countExecuteCallsForRun(runId)).toBe(0);
+  });
+
   it("cancels queued in_review runs when the current participant changes before the run starts", async () => {
     const { companyId, agentId } = await seedCompanyAndAgent();
     const otherAgentId = randomUUID();

@@ -10770,10 +10770,16 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     });
     if (recordedOwnerId !== run.agentId) {
       if (!isNonAssigneeWorkspaceBusyRetry(retryReason, contextSnapshot)) {
+        // Preserve the route's existing error contract: when assignment still
+        // matches, it is the native review participant that changed, not assignee.
+        const reviewParticipantChanged = issue.status === "in_review"
+          && !issue.assigneeUserId && issue.assigneeAgentId === run.agentId;
         return {
           allowed: false,
-          reason: "Scheduled retry suppressed because issue ownership changed",
-          errorCode: "issue_reassigned",
+          reason: reviewParticipantChanged
+            ? "Scheduled retry suppressed because the issue is waiting on another review participant"
+            : "Scheduled retry suppressed because issue ownership changed",
+          errorCode: reviewParticipantChanged ? "issue_review_participant_changed" : "issue_reassigned",
           issueId,
           details: {
             issueId,
@@ -12656,6 +12662,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         id: issues.id,
         status: issues.status,
         assigneeAgentId: issues.assigneeAgentId,
+        assigneeUserId: issues.assigneeUserId,
+        executionPolicy: issues.executionPolicy,
         executionRunId: issues.executionRunId,
         executionState: issues.executionState,
       })
@@ -12713,9 +12721,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const reviewExecutionState = issue.status === "in_review"
       ? parseIssueExecutionState(issue.executionState)
       : null;
-    const reviewParticipant = reviewExecutionState?.currentParticipant ?? null;
-    const isCurrentReviewParticipant = reviewParticipant?.type === "agent" &&
-      reviewParticipant.agentId === run.agentId;
+    const reviewPolicy = normalizeIssueExecutionPolicy(issue.executionPolicy);
+    const recordedOwnerId = recordedIssueExecutionAgent({
+      ...issue, executionPolicy: reviewPolicy, executionState: reviewExecutionState,
+    });
+    const isCurrentReviewParticipant = issue.status === "in_review" && recordedOwnerId === run.agentId;
 
     if (
       issue.assigneeAgentId !== run.agentId &&
@@ -12772,9 +12782,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
     if (issue.status === "in_review") {
       const currentParticipant = reviewExecutionState?.currentParticipant ?? null;
-      if (currentParticipant) {
-        const participantMatches =
-          currentParticipant.type === "agent" && currentParticipant.agentId === run.agentId;
+      if (currentParticipant || reviewPolicy?.stages.length || reviewExecutionState?.currentStageId || issue.assigneeUserId) {
+        const participantMatches = recordedOwnerId === run.agentId;
         if (!participantMatches && !wakeCommentId) {
           return {
             stale: true,
