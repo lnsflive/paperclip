@@ -17765,7 +17765,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         if (
           activeExecutionRun &&
           activeExecutionRun.status !== "running" &&
-          executionOwnerId &&
           activeExecutionRun.agentId !== executionOwnerId
         ) {
           const cancelled = await tx
