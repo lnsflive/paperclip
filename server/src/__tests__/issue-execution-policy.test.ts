@@ -429,7 +429,7 @@ describe("issue execution policy transitions", () => {
       });
     });
 
-    it("executor re-submits after changes → returns to same review stage", () => {
+    it("executor re-submits after changes → returns to same review stage while preserving verdict history", () => {
       const result = applyIssueExecutionPolicyTransition({
         issue: {
           status: "in_progress",
@@ -462,6 +462,94 @@ describe("issue execution policy transitions", () => {
         currentStageId: reviewStageId,
         currentStageType: "review",
         currentParticipant: { type: "agent", agentId: qaAgentId },
+        lastDecisionId: null,
+        lastDecisionOutcome: "changes_requested",
+      });
+    });
+
+    it("explicit in_review restoration preserves the last changes-requested verdict", () => {
+      const result = applyIssueExecutionPolicyTransition({
+        issue: {
+          status: "blocked",
+          assigneeAgentId: coderAgentId,
+          assigneeUserId: null,
+          executionPolicy: policy,
+          executionState: {
+            status: "changes_requested",
+            currentStageId: reviewStageId,
+            currentStageIndex: 0,
+            currentStageType: "review",
+            currentParticipant: { type: "agent", agentId: qaAgentId },
+            returnAssignee: { type: "agent", agentId: coderAgentId },
+            completedStageIds: [],
+            lastDecisionId: "11111111-1111-4111-8111-111111111111",
+            lastDecisionOutcome: "changes_requested",
+          },
+        },
+        policy,
+        requestedStatus: "in_review",
+        requestedAssigneePatch: {},
+        actor: { userId: boardUserId },
+      });
+
+      expect(result.patch.status).toBe("in_review");
+      expect(result.patch.assigneeAgentId).toBe(qaAgentId);
+      expect(result.patch.executionState).toMatchObject({
+        status: "pending",
+        currentStageId: reviewStageId,
+        currentStageType: "review",
+        currentParticipant: { type: "agent", agentId: qaAgentId },
+        returnAssignee: { type: "agent", agentId: coderAgentId },
+        lastDecisionId: "11111111-1111-4111-8111-111111111111",
+        lastDecisionOutcome: "changes_requested",
+      });
+    });
+
+    it("keeps the restored reviewer live across repeated reconciliation", () => {
+      const restored = applyIssueExecutionPolicyTransition({
+        issue: {
+          status: "blocked",
+          assigneeAgentId: coderAgentId,
+          assigneeUserId: null,
+          executionPolicy: policy,
+          executionState: {
+            status: "changes_requested",
+            currentStageId: reviewStageId,
+            currentStageIndex: 0,
+            currentStageType: "review",
+            currentParticipant: { type: "agent", agentId: qaAgentId },
+            returnAssignee: { type: "agent", agentId: coderAgentId },
+            completedStageIds: [],
+            lastDecisionId: "11111111-1111-4111-8111-111111111111",
+            lastDecisionOutcome: "changes_requested",
+          },
+        },
+        policy,
+        requestedStatus: "in_review",
+        requestedAssigneePatch: {},
+        actor: { userId: boardUserId },
+      });
+
+      const repeated = applyIssueExecutionPolicyTransition({
+        issue: {
+          status: restored.patch.status as string,
+          assigneeAgentId: restored.patch.assigneeAgentId as string,
+          assigneeUserId: null,
+          executionPolicy: policy,
+          executionState: restored.patch.executionState as IssueExecutionState,
+        },
+        policy,
+        requestedStatus: "in_review",
+        requestedAssigneePatch: {},
+        actor: { userId: boardUserId },
+      });
+
+      expect(repeated.patch).toEqual({});
+      expect(restored.patch.executionState).toMatchObject({
+        status: "pending",
+        currentStageId: reviewStageId,
+        currentParticipant: { type: "agent", agentId: qaAgentId },
+        lastDecisionOutcome: "changes_requested",
       });
     });
   });

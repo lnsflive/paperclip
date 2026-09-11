@@ -30,6 +30,7 @@ import {
   mergeExecutionWorkspaceConfig,
   readExecutionWorkspaceConfig,
 } from "../services/execution-workspaces.ts";
+import { issueService } from "../services/issues.ts";
 import {
   startRuntimeServicesForWorkspaceControl,
   stopRuntimeServicesForExecutionWorkspace,
@@ -576,6 +577,7 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
       },
       nextAction: "Repair the source issue workspace link.",
     });
+    const [sourceIssueBeforeRestore] = await db.select().from(issues).where(eq(issues.id, issueId));
 
     const result = await svc.reconcileExecutionWorkspaceBranch(executionWorkspaceId, {
       mode: "forward",
@@ -731,6 +733,7 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
       },
       nextAction: "Repair the source issue workspace link.",
     });
+    const [sourceIssueBeforeRestore] = await db.select().from(issues).where(eq(issues.id, issueId));
 
     const result = await svc.reconcileExecutionWorkspaceBranch(executionWorkspaceId, {
       mode: "quarantine_restore",
@@ -1008,8 +1011,8 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
         returnAssignee: { type: "agent", agentId: coderAgentId },
         reviewRequest: null,
         completedStageIds: [],
-        lastDecisionId: null,
-        lastDecisionOutcome: null,
+        lastDecisionId: randomUUID(),
+        lastDecisionOutcome: "changes_requested",
       },
     });
     await db.insert(executionWorkspaces).values({
@@ -1043,6 +1046,10 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
       },
       nextAction: "Repair the source issue workspace link.",
     });
+    const [sourceIssueBeforeRestore] = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, issueId));
 
     const result = await svc.reconcileExecutionWorkspaceBranch(executionWorkspaceId, {
       mode: "quarantine_restore",
@@ -1076,6 +1083,46 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
       currentStageType: stageType,
       currentParticipant: { type: "agent", agentId: reviewerAgentId },
       returnAssignee: { type: "agent", agentId: coderAgentId },
+    });
+
+    const issueSvc = issueService(db);
+    await expect(
+      issueSvc.update(
+        issueId,
+        {
+          status: "in_progress",
+          assigneeAgentId: coderAgentId,
+          executionState: {
+            status: "changes_requested",
+            currentStageId: reviewStageId,
+            currentStageIndex: 0,
+            currentStageType: stageType,
+            currentParticipant: { type: "agent", agentId: reviewerAgentId },
+            returnAssignee: { type: "agent", agentId: coderAgentId },
+            reviewRequest: null,
+            completedStageIds: [],
+            lastDecisionId: null,
+            lastDecisionOutcome: "changes_requested",
+          },
+        },
+        undefined,
+        {
+          expectedUpdatedAt: sourceIssueBeforeRestore!.updatedAt,
+          expectedRoutingState: {
+            status: sourceIssueBeforeRestore!.status,
+            assigneeAgentId: sourceIssueBeforeRestore!.assigneeAgentId,
+            assigneeUserId: sourceIssueBeforeRestore!.assigneeUserId,
+            executionState: sourceIssueBeforeRestore!.executionState,
+          },
+        },
+      ),
+    ).rejects.toMatchObject({
+      status: 409,
+      message: "Issue update conflict",
+      details: {
+        issueId,
+        reason: "stale_snapshot",
+      },
     });
   }, 20_000);
 

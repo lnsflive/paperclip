@@ -9914,10 +9914,21 @@ export function issueRoutes(
             commentOptions,
             tx,
           );
-          const updated = await svc.update(id, updatePatch, tx);
+          const updated = await svc.update(id, updatePatch, tx, {
+            // addComment updates issues.updatedAt inside this same transaction. The
+            // routing-state predicate remains the compare-and-set guard here; using
+            // the pre-comment timestamp would reject every valid approval as stale.
+            expectedUpdatedAt: undefined,
+            expectedRoutingState: {
+              status: currentIssue.status,
+              assigneeAgentId: currentIssue.assigneeAgentId,
+              assigneeUserId: currentIssue.assigneeUserId,
+              executionState: currentIssue.executionState,
+            },
+          });
+          if (!updated) throw new AutoApprovalIssueMissingError();
           // Throw (not return null) so drizzle rolls back the inserted comment when the issue
           // has been concurrently deleted between the initial fetch and the in-transaction update.
-          if (!updated) throw new AutoApprovalIssueMissingError();
 
           if (transition.decision && decisionId) {
             await tx.insert(issueExecutionDecisions).values({
