@@ -85,7 +85,9 @@ describeEmbeddedPostgres("heartbeat responsible-user invariant", () => {
 
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-heartbeat-responsible-user-");
-    db = createDb(tempDb.connectionString);
+    // All attribution branches must use the enqueue transaction, not borrow
+    // a second pool connection while creating an issue or generic wake.
+    db = createDb(tempDb.connectionString, { maxConnections: 1 });
     heartbeat = heartbeatService(db);
   }, 20_000);
 

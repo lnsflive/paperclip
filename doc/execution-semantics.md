@@ -350,6 +350,63 @@ If the committed update assigns the issue to a user, clears the agent assignee, 
 
 Plain text is not assignment. Writing an agent's name, role, or team label in a comment does not change ownership and does not create an agent wake. Agent routing from comment text requires a structured agent mention that resolves inside the company, an explicit `assigneeAgentId` mutation, or an existing current agent assignee receiving normal issue-thread feedback.
 
+When a run releases an issue with multiple deferred wakes, promotion prefers the
+recorded next agent owner: the assignee for `todo`/`in_progress`, or the pending
+typed participant of a matching configured `in_review` stage. Human-owned,
+blocked, parked, terminal, and stage-less review issues retain FIFO ordering.
+Other deferred comments and mentions are retained with their original payloads
+and timestamps, not acknowledged or discarded. Within each priority class,
+request time and then wake id determine order. This preference neither changes
+assignment nor bypasses invokability, pause, dependency, budget, or dispatch
+staleness checks. It prevents an old executor's comment follow-up from taking
+the issue slot ahead of an already queued native handoff.
+
+Before promotion, unresolved dependency gates skip non-interaction wakes and
+continue scanning the deferred queue in the same transaction. This preserves
+permitted comment follow-ups even when the preferred assignment cannot run.
+Skipped wake payloads remain available for audit. Normal blocker resolution
+wakes the execution owner, or the pending typed participant of a matching native
+review stage even when the saved executor remains the assignee. Completion routes
+and the periodic/finalization backstop use the same recipient rule; neither changes
+assignment. Human or inconsistent native stages never fall back to the saved
+developer, while stage-less external reviews retain their agent owner. Company
+membership, all-blocker/workspace-finalization readiness, pause, idempotency and
+dispatch checks still apply. The claim-time dependency check remains authoritative
+if dependencies change after promotion.
+The same recorded execution owner governs deferred-promotion slot reservation,
+claim-time active-run registration, and queued-holder reassignment checks. A
+matching pending reviewer is not a stale holder merely because the saved
+developer remains assigned. Context-only developer input does not take the
+reviewer's slot. Ownership is read under the issue row lock before registering
+execution, so cancellation and interrupt surfaces can find the actual reviewer.
+Bounded retry admission/promotion and cancellation of not-yet-due retries use this
+same owner. A saved developer's comment does not discard the pending reviewer's
+retry; a changed, human or inconsistent review owner still invalidates it. Existing
+retry limits, dependency/pause/budget gates and the in-progress-only max-turn policy
+remain unchanged.
+Claim revalidates the typed owner after retry promotion too: a human handoff or
+inconsistent review stage invalidates queued ownership-bound work before adapter
+execution. Existing explicitly comment-driven interaction exceptions remain intact.
+The locked registration read repeats that validation: if ownership changes after
+the unlocked preflight and the run's running transition, the claim is cancelled
+and never dispatched to an adapter. A native review-participant transition is
+reported as `issue_review_participant_changed`, not a saved-developer reassignment;
+a human assignment remains an ownership change.
+Reads needed for that validation use the claim transaction, including continuation
+documents, so a one-connection pool cannot deadlock on a second connection.
+Wakeup creation likewise resolves issue, routine and responsible-user context
+through its own transaction. This preserves attribution precedence while avoiding
+a second connection during run finalization's follow-up enqueue.
+Both preflight and locked stale-claim cancellation promote deferred input after
+releasing the agent-start lock; the next owner need not wait for a periodic backstop.
+Promotion's session, routine attribution and subtree-pause ancestor reads use the
+same locked transaction as the deferred wake. The one-connection handoff contract
+includes these reads and the promoted adapter's finalization, not only claim admission.
+Permitted blocked interactions carry current unresolved-blocker context for the
+adapter's bounded-interaction instructions. If dependencies change before claim,
+cancelled assignment runs release and promote deferred work after leaving the
+agent-start lock, including when the next permitted interaction uses that agent.
+
 Pause and tree-control previews should make the same distinction visible. They should report whether the affected subtree contains live running work, queued wakes, agent-owned work, or only human-owned/static issues, so a pause after a handoff does not look like it interrupted agent execution when no agent execution path existed.
 
 ### Adapter-backed workspace coherence

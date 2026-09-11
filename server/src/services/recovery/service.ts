@@ -30,6 +30,7 @@ import {
 import { parseObject, asBoolean, asNumber } from "../../adapters/utils.js";
 import { runningProcesses } from "../../adapters/index.js";
 import { visibleIssueCondition } from "../issue-visibility.js";
+import { resolvedDependencyWakeAgent } from "../deferred-issue-wake-priority.js";
 import { forbidden, notFound } from "../../errors.js";
 import { logger } from "../../middleware/logger.js";
 import { isPidAlive, isProcessGroupAlive, terminateLocalService } from "../local-service-supervisor.js";
@@ -5143,9 +5144,12 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
 
     const queryCandidates = (afterIssueId: string | null) => {
       const filters = [
-        eq(issues.status, "blocked"),
+        inArray(issues.status, ["blocked", "in_review"]),
         visibleIssueCondition(),
-        sql`${issues.assigneeAgentId} is not null`,
+        or(
+          sql`${issues.assigneeAgentId} is not null`,
+          and(eq(issues.status, "in_review"), sql`${issues.executionState}->'currentParticipant'->>'agentId' is not null`),
+        )!,
       ];
       if (opts?.companyId) filters.push(eq(issues.companyId, opts.companyId));
       if (afterIssueId) filters.push(gt(issues.id, afterIssueId));
@@ -5163,6 +5167,10 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
             companyId: issues.companyId,
             identifier: issues.identifier,
             assigneeAgentId: issues.assigneeAgentId,
+            assigneeUserId: issues.assigneeUserId,
+            status: issues.status,
+            executionPolicy: issues.executionPolicy,
+            executionState: issues.executionState,
             totalCount: sql<number>`count(*) over()::int`,
           })
           .from(issueRelations)
@@ -5178,6 +5186,10 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           companyId: issues.companyId,
           identifier: issues.identifier,
           assigneeAgentId: issues.assigneeAgentId,
+          assigneeUserId: issues.assigneeUserId,
+          status: issues.status,
+          executionPolicy: issues.executionPolicy,
+          executionState: issues.executionState,
           totalCount: sql<number>`count(*) over()::int`,
         })
         .from(issues)
@@ -5222,14 +5234,21 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     }
 
     for (const [companyId, companyCandidates] of candidatesByCompany.entries()) {
+      const companyAgents = await db.select({ id: agents.id }).from(agents)
+        .where(eq(agents.companyId, companyId));
+      const companyAgentIds = new Set(companyAgents.map((agent) => agent.id));
       const readinessMap = await issuesSvc.listDependencyReadiness(
         companyId,
         companyCandidates.map((candidate) => candidate.id),
       );
 
       for (const candidate of companyCandidates) {
-        const agentId = candidate.assigneeAgentId;
-        if (!agentId) continue;
+        const agentId = resolvedDependencyWakeAgent({
+          ...candidate,
+          executionPolicy: normalizeIssueExecutionPolicy(candidate.executionPolicy),
+          executionState: parseIssueExecutionState(candidate.executionState),
+        });
+        if (!agentId || !companyAgentIds.has(agentId)) continue;
 
         const readiness = readinessMap.get(candidate.id);
         const resolvedBlockerIssueId = readiness?.blockerIssueIds[0] ?? null;

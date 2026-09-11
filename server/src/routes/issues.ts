@@ -9729,7 +9729,7 @@ export function issueRoutes(
         const dependents = await svc.listWakeableBlockedDependents(issue.id);
         for (const dependent of dependents) {
           await addDependencyResolvedWakeup({
-            agentId: dependent.assigneeAgentId,
+            agentId: dependent.wakeAgentId,
             dependentIssueId: dependent.id,
             resolvedBlockerIssueId: issue.id,
             blockerIssueIds: dependent.blockerIssueIds,
@@ -11578,7 +11578,7 @@ export function issueRoutes(
         const dependents = await svc.listWakeableBlockedDependents(currentIssue.id);
         for (const dependent of dependents) {
           await addDependencyResolvedWakeup({
-            agentId: dependent.assigneeAgentId,
+            agentId: dependent.wakeAgentId,
             dependentIssueId: dependent.id,
             resolvedBlockerIssueId: currentIssue.id,
             blockerIssueIds: dependent.blockerIssueIds,

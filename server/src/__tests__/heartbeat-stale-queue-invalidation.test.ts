@@ -12,7 +12,10 @@ import {
   heartbeatRuns,
   issueComments,
   issueDocuments,
+  issueRelations,
+  issueTreeHolds,
   issues,
+  routines,
 } from "@paperclipai/db";
 import { ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY } from "@paperclipai/shared";
 import {
@@ -1047,6 +1050,167 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect(promotedRun?.agentId).toBe(peerAgentId);
   });
 
+  it.each([
+    { status: "in_progress", ownerState: "active" },
+    { status: "in_review", ownerState: "active" },
+    { status: "in_review", ownerState: "active", savedDeveloper: true },
+    { status: "in_review", ownerState: "active", savedDeveloper: true, dependenciesBlocked: true },
+    { status: "in_progress", ownerState: "paused" },
+    { status: "in_progress", ownerState: "terminated" },
+    { status: "in_progress", ownerState: "foreign-company" },
+    { status: "in_progress", ownerState: "active", dependenciesBlocked: true },
+    { status: "in_review", ownerState: "active", dependenciesBlocked: true },
+    { status: "in_progress", ownerState: "active", dependenciesBlocked: true, sameAgent: true },
+    { status: "in_progress", ownerState: "active", dependenciesBlocked: true, blockAtClaim: true },
+    { status: "in_progress", ownerState: "active", dependenciesBlocked: true, blockAtClaim: true, sameAgent: true },
+    { status: "in_progress", ownerState: "active", dependenciesBlocked: true, resolveAtClaim: true },
+    { status: "in_progress", ownerState: "active", dependenciesBlocked: true, resolveAtClaim: true, sameAgent: true },
+  ])("prioritizes eligible native owners and preserves input ($status/$ownerState/blocked=$dependenciesBlocked/same=$sameAgent/race=$blockAtClaim/resolve=$resolveAtClaim/saved=$savedDeveloper)", async ({ status, ownerState, dependenciesBlocked = false, sameAgent = false, blockAtClaim = false, resolveAtClaim = false, savedDeveloper = false }) => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const { companyId: otherCompanyId } = await seedCompanyAndAgent();
+    const nextAgentId = randomUUID();
+    const issueId = randomUUID();
+    const oldWakeId = randomUUID();
+    const ownerWakeId = randomUUID();
+    const foreignWakeId = randomUUID();
+    const stageId = randomUUID();
+    const ownerEligible = ownerState === "active" && !dependenciesBlocked;
+    const commentAgentId = sameAgent ? nextAgentId : agentId;
+    await db.insert(agents).values({
+      id: nextAgentId, companyId: ownerState === "foreign-company" ? otherCompanyId : companyId,
+      name: "NextOwner", role: "engineer",
+      status: ownerState === "foreign-company" ? "active" : ownerState,
+      adapterType: "codex_local", adapterConfig: {},
+      runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } },
+      permissions: {},
+    });
+    const { runId } = await seedQueuedRun({ companyId, agentId, issueId, wakeReason: "issue_assigned" });
+    await db.insert(issues).values({
+      id: issueId, companyId, title: "Native handoff priority", status,
+      assigneeAgentId: savedDeveloper ? agentId : nextAgentId, executionRunId: runId,
+      executionPolicy: {
+        mode: "auto", commentRequired: true,
+        stages: [{ id: stageId, type: "review", approvalsNeeded: 1,
+          participants: [{ id: randomUUID(), type: "agent", agentId: nextAgentId }] }],
+      },
+      executionState: {
+        status: status === "in_review" ? "pending" : "changes_requested",
+        currentStageId: stageId, currentStageIndex: 0, currentStageType: "review",
+        currentParticipant: { type: "agent", agentId: nextAgentId },
+        returnAssignee: { type: "agent", agentId }, completedStageIds: [],
+        reviewRequest: null, lastDecisionId: null, lastDecisionOutcome: null,
+      },
+    });
+    const oldRequestedAt = new Date("2026-01-01T00:00:00Z");
+    const blockerId = randomUUID();
+    const addBlocker = () => db.insert(issueRelations).values({ companyId, issueId: blockerId, relatedIssueId: issueId, type: "blocks" });
+    if (dependenciesBlocked) {
+      await db.insert(issues).values({ id: blockerId, companyId, title: "Unresolved dependency", status: "todo" });
+      if (!blockAtClaim) await addBlocker();
+    }
+    const commentIds = [randomUUID(), randomUUID()];
+    await db.insert(issueComments).values(commentIds.map((id) => ({
+      id, companyId, issueId, authorUserId: "responsible-user", body: "Real deferred follow-up input",
+    })));
+    const oldPayload = {
+      issueId,
+      _paperclipWakeContext: {
+        issueId, wakeReason: "issue_commented", wakeCommentIds: commentIds,
+      },
+    };
+    await db.insert(agentWakeupRequests).values([
+      // Even an earlier preferred-agent wake with this issue ID must be ignored
+      // when the wake itself belongs to another company.
+      { id: foreignWakeId, companyId: otherCompanyId, agentId: nextAgentId,
+        source: "assignment", triggerDetail: "system",
+        reason: "issue_execution_deferred", status: "deferred_issue_execution",
+        requestedAt: new Date("2025-12-31T23:59:00Z"), payload: { issueId } },
+      { id: oldWakeId, companyId, agentId: commentAgentId, source: "comment", triggerDetail: "system",
+        reason: "issue_execution_deferred", status: "deferred_issue_execution",
+        requestedAt: oldRequestedAt, payload: oldPayload },
+      { id: ownerWakeId, companyId, agentId: nextAgentId, source: "assignment", triggerDetail: "system",
+        reason: "issue_execution_deferred", status: "deferred_issue_execution",
+        requestedAt: new Date(sameAgent ? "2025-12-31T23:59:30Z" : "2026-01-01T00:01:00Z"),
+        payload: { issueId, _paperclipWakeContext: { issueId, wakeReason: "issue_assigned" } } },
+    ]);
+    let releaseAdapter!: () => void;
+    const adapterGate = new Promise<void>((resolve) => { releaseAdapter = resolve; });
+    mockAdapterExecute.mockImplementation(async () => {
+      await adapterGate;
+      return { exitCode: 0, signal: null, timedOut: false, errorMessage: null,
+        summary: "Handoff priority fixture", provider: "test", model: "test-model" };
+    });
+    const originalTransaction = db.transaction.bind(db);
+    const promotionRace = blockAtClaim || resolveAtClaim ? vi.spyOn(db, "transaction").mockImplementation(async (...args) => {
+      const result = await originalTransaction(...args);
+      if ((result as { kind?: string } | undefined)?.kind === "promoted") {
+        promotionRace!.mockRestore();
+        // A real dependency change lands after promotion commits, before claim.
+        if (resolveAtClaim) await db.update(issues).set({ status: "done" }).where(eq(issues.id, blockerId));
+        else await addBlocker();
+      }
+      return result;
+    }) : null;
+    try {
+      // Only a seeded, process-free run in this isolated test database is cancelled.
+      await heartbeat.cancelRun(runId, "Fixture holder finished");
+      const [ownerWake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, ownerWakeId));
+      const [oldWake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, oldWakeId));
+      const [foreignWake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, foreignWakeId));
+      expect(foreignWake).toMatchObject({ status: "deferred_issue_execution", runId: null });
+      expect(oldWake).toMatchObject({ payload: oldPayload, requestedAt: oldRequestedAt });
+      if (ownerEligible) {
+        expect(ownerWake?.runId).toBeTruthy();
+        expect(oldWake).toMatchObject({ status: "deferred_issue_execution", runId: null });
+      } else if (dependenciesBlocked) {
+        expect(oldWake?.runId).toBeTruthy();
+        expect(ownerWake?.status).toBe("skipped");
+        if (blockAtClaim) expect(ownerWake?.runId).toBeTruthy();
+        else expect(ownerWake?.runId).toBeNull();
+        expect(ownerWake?.error).toContain("dependencies are still blocked");
+      } else {
+        expect(ownerWake).toMatchObject({ status: "failed", runId: null });
+        expect(ownerWake?.error).toContain("agent is not invokable");
+        expect(oldWake?.runId).toBeTruthy();
+      }
+      const promotedId = ownerEligible ? ownerWake!.runId! : oldWake!.runId!;
+      const [promoted] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, promotedId));
+      expect(promoted?.agentId).toBe(ownerEligible ? nextAgentId : commentAgentId);
+      const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
+      expect(issue?.assigneeAgentId).toBe(savedDeveloper ? agentId : nextAgentId);
+      expect(issue?.executionRunId).toBe(ownerEligible || sameAgent ? promoted?.id : null);
+      expect(await waitForCondition(async () => countExecuteCallsForRun(promoted!.id) === 1)).toBe(true);
+      if (dependenciesBlocked) {
+        expect(promoted?.contextSnapshot).toMatchObject({
+          wakeReason: "issue_commented", wakeCommentIds: commentIds,
+          dependencyBlockedInteraction: !resolveAtClaim, unresolvedBlockerCount: resolveAtClaim ? 0 : 1,
+          unresolvedBlockerIssueIds: resolveAtClaim ? [] : [blockerId],
+          unresolvedBlockerSummaries: resolveAtClaim ? [] : [expect.objectContaining({ id: blockerId })],
+        });
+        const issueRuns = await db.select().from(heartbeatRuns);
+        const ownerRuns = issueRuns.filter((row) => row.wakeupRequestId === ownerWakeId);
+        expect(ownerRuns).toHaveLength(blockAtClaim ? 1 : 0);
+        for (const ownerRun of ownerRuns) {
+          expect(ownerRun).toMatchObject({ status: "cancelled", errorCode: "issue_dependencies_blocked" });
+          expect(countExecuteCallsForRun(ownerRun.id)).toBe(0);
+        }
+      }
+      await db.insert(issueComments).values({
+        companyId, issueId, authorAgentId: promoted!.agentId, createdByRunId: promoted!.id,
+        body: "Fixture handoff recorded; no missing-comment recovery is required.",
+      });
+    } finally {
+      promotionRace?.mockRestore();
+      // Prevent fixture-only successful-run recovery while letting both inputs drain.
+      await db.update(issues).set({ status: "done", executionState: null }).where(eq(issues.id, issueId));
+      releaseAdapter();
+    }
+    expect(await waitForCondition(async () => {
+      const [oldWake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, oldWakeId));
+      return Boolean(oldWake?.runId);
+    }, 5_000)).toBe(true);
+  }, 15_000);
+
   it("cancels queued runs when the issue assignee changes before the run starts", async () => {
     const { companyId, agentId } = await seedCompanyAndAgent({ agentName: "OriginalCoder" });
     const replacementAgentId = randomUUID();
@@ -1317,6 +1481,128 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect(countExecuteCallsForRun(runId)).toBe(0);
   });
 
+  it.each(["human", "malformed", "malformed_saved_reviewer", "claim_human", "claim_malformed", "claim_next_reviewer", "claim_deferred_reviewer", "preflight_deferred_reviewer"])("rechecks native ownership after retry promotion (%s)", async (change) => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const developerId = randomUUID(), issueId = randomUUID(), stageId = randomUUID();
+    await db.insert(agents).values({
+      id: developerId, companyId, name: "Saved developer", role: "engineer", status: "active",
+      adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {},
+    });
+    const state = {
+      status: "pending", currentStageId: stageId, currentStageIndex: 0, currentStageType: "review",
+      currentParticipant: { type: "agent", agentId }, returnAssignee: { type: "agent", agentId: developerId },
+      completedStageIds: [], reviewRequest: null, lastDecisionId: null, lastDecisionOutcome: null,
+    };
+    await db.insert(issues).values({
+      id: issueId, companyId, title: "Promoted reviewer retry", status: "in_review",
+      assigneeAgentId: change === "malformed_saved_reviewer" ? agentId : developerId,
+      executionPolicy: { mode: "auto", commentRequired: true, stages: [{
+        id: stageId, type: "review", approvalsNeeded: 1,
+        participants: [{ id: randomUUID(), type: "agent", agentId },
+          { id: randomUUID(), type: "agent", agentId: developerId }],
+      }] }, executionState: state,
+    });
+    if (change.endsWith("deferred_reviewer")) {
+      const routineId = randomUUID(), parentId = randomUUID(), heldIssueId = randomUUID();
+      await db.insert(routines).values({
+        id: routineId, companyId, title: "Reviewer routine", responsibleUserId: "routine-owner",
+      });
+      await db.insert(issues).values([
+        { id: parentId, companyId, title: "Unheld review parent", status: "backlog" },
+        { id: heldIssueId, companyId, title: "Unrelated paused tree", status: "backlog" },
+      ]);
+      await db.insert(issueTreeHolds).values({ companyId, rootIssueId: heldIssueId, mode: "pause" });
+      await db.update(issues).set({ parentId, originKind: "routine_execution", originId: routineId })
+        .where(eq(issues.id, issueId));
+    }
+    const { runId } = await seedQueuedRun({ companyId, agentId, issueId,
+      wakeReason: "heartbeat_retry", scheduledRetryReason: "transient_failure" });
+    const due = new Date();
+    await db.update(heartbeatRuns).set({ status: "scheduled_retry", scheduledRetryAt: due })
+      .where(eq(heartbeatRuns.id, runId));
+    expect(await heartbeat.promoteDueScheduledRetries(due)).toEqual({ promoted: 1, runIds: [runId] });
+    expect(countExecuteCallsForRun(runId)).toBe(0);
+    const mutateOwnership = () => db.update(issues).set(change.endsWith("human")
+      ? { assigneeUserId: "local-board" }
+      : { executionState: ["claim_next_reviewer", "claim_deferred_reviewer", "preflight_deferred_reviewer"].includes(change)
+        ? { ...state, currentParticipant: { type: "agent", agentId: developerId } }
+        : { ...state, currentStageId: randomUUID() } }).where(eq(issues.id, issueId));
+    const claimDb = change.endsWith("deferred_reviewer")
+      ? createDb(tempDb!.connectionString, { maxConnections: 1 }) : db;
+    const claimHeartbeat = claimDb === db ? heartbeat : heartbeatService(claimDb);
+    const originalTransaction = claimDb.transaction.bind(claimDb);
+    let injectedDuringClaim = false;
+    const deferredWakeId = randomUUID();
+    const seedDeferredReviewer = async () => {
+      await db.update(issues).set({ executionRunId: runId }).where(eq(issues.id, issueId));
+      await db.insert(agentWakeupRequests).values({
+        id: deferredWakeId, companyId, agentId: developerId,
+        source: "automation", triggerDetail: "system", reason: "issue_execution_deferred",
+        status: "deferred_issue_execution", payload: {
+          issueId, _paperclipWakeContext: { issueId, wakeReason: "execution_review_requested" },
+        },
+      });
+    };
+    const claimRace = change.startsWith("claim_")
+      ? vi.spyOn(claimDb, "transaction").mockImplementation(async (...args) => {
+        const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+        if (run?.status === "running" && !injectedDuringClaim) {
+          injectedDuringClaim = true;
+          // The unlocked staleness read and queued -> running update have finished.
+          // Commit a real ownership mutation before the lazy issue-row lock read.
+          await mutateOwnership();
+          if (change === "claim_deferred_reviewer") {
+            await seedDeferredReviewer();
+          }
+        }
+        return originalTransaction(...args);
+      }) : null;
+    let dispatch: Promise<unknown> | undefined;
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    try {
+      if (!claimRace) await mutateOwnership();
+      if (change === "preflight_deferred_reviewer") await seedDeferredReviewer();
+      dispatch = claimHeartbeat.resumeQueuedRuns();
+      await Promise.race([
+        dispatch,
+        new Promise<never>((_, reject) => {
+          deadline = setTimeout(() => reject(new Error("Stale-claim deferred promotion stalled")), 4_000);
+        }),
+      ]);
+      clearTimeout(deadline);
+      expect(await waitForCondition(async () =>
+        (await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId)))[0]?.status === "cancelled",
+      )).toBe(true);
+      if (claimRace) expect(injectedDuringClaim).toBe(true);
+      expect(countExecuteCallsForRun(runId)).toBe(0);
+      expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0]?.executionRunId).not.toBe(runId);
+      if (change.endsWith("deferred_reviewer")) {
+        expect(await waitForCondition(async () => {
+          const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, deferredWakeId));
+          return Boolean(wake?.runId && countExecuteCallsForRun(wake.runId) === 1);
+        })).toBe(true);
+        await Promise.race([
+          claimHeartbeat.drainActiveRunExecutions(),
+          new Promise<never>((_, reject) => {
+            deadline = setTimeout(() => reject(new Error("Promoted reviewer finalization stalled")), 4_000);
+          }),
+        ]);
+        const [promotedWake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, deferredWakeId));
+        const [promotedRun] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, promotedWake.runId!));
+        expect(promotedRun?.status).toBe("succeeded");
+        // A claimed run already has attribution; preflight cancellation has none,
+        // so the deferred routine supplies its owner only in the latter case.
+        expect(promotedRun?.responsibleUserId).toBe(change === "claim_deferred_reviewer"
+          ? "responsible-user" : "routine-owner");
+      }
+    } finally {
+      clearTimeout(deadline);
+      claimRace?.mockRestore();
+      if (claimDb !== db) await claimDb.$client.end({ timeout: 0 });
+      await dispatch?.catch(() => {});
+    }
+  });
+
   it("cancels queued in_review runs when the current participant changes before the run starts", async () => {
     const { companyId, agentId } = await seedCompanyAndAgent();
     const otherAgentId = randomUUID();
@@ -1514,6 +1800,48 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect(run?.errorCode).toBeNull();
     expect(countExecuteCallsForRun(runId)).toBe(1);
   });
+
+  it.each([false, true])("claims continuation with one DB connection (stored summary=%s)", async (hasSummary) => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const issueId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId, companyId, title: "Single-connection continuation", status: "in_progress", assigneeAgentId: agentId,
+    });
+    if (hasSummary) await seedContinuationSummary({
+      companyId, issueId, agentId, body: "## Next Action\n\nImplement the accepted correction and run its regression test.",
+    });
+    const { runId } = await seedQueuedRun({ companyId, agentId, issueId, wakeReason: "issue_continuation_needed" });
+    const singleDb = createDb(tempDb!.connectionString, { maxConnections: 1 });
+    const singleHeartbeat = heartbeatService(singleDb);
+    const dispatch = singleHeartbeat.resumeQueuedRuns();
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    try {
+      expect(await Promise.race([
+        dispatch.then(() => true),
+        new Promise<boolean>((resolve) => { deadline = setTimeout(() => resolve(false), 4_000); }),
+      ])).toBe(true);
+      expect(await waitForCondition(async () => countExecuteCallsForRun(runId) === 1)).toBe(true);
+      clearTimeout(deadline);
+      const drained = await Promise.race([
+        singleHeartbeat.drainActiveRunExecutions().then(() => true),
+        new Promise<boolean>((resolve) => { deadline = setTimeout(() => resolve(false), 4_000); }),
+      ]);
+      if (!drained) {
+        const activity = await db.execute(sql`select state, wait_event_type, wait_event, left(query, 250) as query
+          from pg_stat_activity where datname = current_database() and pid <> pg_backend_pid()`);
+        throw new Error(`Single-connection finalization stalled: ${JSON.stringify(activity)}`);
+      }
+      const [completed] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+      expect(completed?.status).toBe("succeeded");
+      expect(completed?.errorCode).toBeNull();
+      expect(completed?.responsibleUserId).toBeTruthy();
+    } finally {
+      clearTimeout(deadline);
+      // End only this test's one-connection client, also releasing a negative-control deadlock.
+      await singleDb.$client.end({ timeout: 0 });
+      await dispatch.catch(() => {});
+    }
+  }, 15_000);
 
   it("cancels queued continuation recovery when the continuation summary parks executor work for review", async () => {
     const { companyId, agentId } = await seedCompanyAndAgent();

@@ -461,6 +461,68 @@ describeEmbeddedPostgres("heartbeat issue graph liveness escalation", () => {
     });
   });
 
+  it.each(["agent", "user", "stale", "foreign"])("rechecks a dependency-gated native %s review without waking its saved developer", async (kind) => {
+    const { companyId, agentId, blockedIssueId, blockerIssueId, executionWorkspaceId } =
+      await seedResolvedDependencyBackstopFixture({ workspaceState: "not_finalized" });
+    const reviewerId = randomUUID();
+    const reviewerCompanyId = kind === "foreign" ? randomUUID() : companyId;
+    if (kind === "foreign") await db.insert(companies).values({ id: reviewerCompanyId, name: "Foreign reviewer company" });
+    await db.insert(agents).values({
+      id: reviewerId, companyId: reviewerCompanyId, name: "Pending reviewer", role: "engineer",
+      status: "idle", adapterType: "test_adapter", adapterConfig: {}, permissions: {},
+      runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } },
+    });
+    const stageId = randomUUID();
+    const participant = kind === "user"
+      ? { type: "user" as const, userId: "board" }
+      : { type: "agent" as const, agentId: reviewerId };
+    await db.update(issues).set({
+      status: "in_review",
+      executionPolicy: { mode: "auto", commentRequired: true, stages: [{
+        id: stageId, type: "review", approvalsNeeded: 1,
+        participants: [{ ...participant, id: randomUUID() }],
+      }] },
+      executionState: {
+        status: "pending", currentStageId: kind === "stale" ? randomUUID() : stageId,
+        currentStageType: "review", currentStageIndex: 0, currentParticipant: participant,
+        returnAssignee: { type: "agent", agentId }, completedStageIds: [],
+        reviewRequest: null, lastDecisionId: null, lastDecisionOutcome: null,
+      },
+    }).where(eq(issues.id, blockedIssueId));
+    const originalReviewWakeId = randomUUID();
+    await db.insert(agentWakeupRequests).values({
+      id: originalReviewWakeId, companyId, agentId: reviewerId,
+      source: "assignment", triggerDetail: "system", reason: "issue_assigned",
+      payload: { issueId: blockedIssueId }, status: "skipped", finishedAt: new Date(),
+      error: "Issue dependencies are still blocked",
+    });
+    const heartbeat = heartbeatService(db);
+    expect((await heartbeat.reconcileIssueGraphLiveness()).dependencyWakesHealed).toBe(0);
+    expect(await db.select().from(agentWakeupRequests)).toHaveLength(1);
+    await db.insert(workspaceOperations).values({
+      companyId, executionWorkspaceId, issueId: blockerIssueId,
+      phase: "workspace_finalize", status: "succeeded", startedAt: new Date(),
+    });
+    const result = await heartbeat.reconcileIssueGraphLiveness();
+    expect(result.dependencyWakesHealed).toBe(kind === "agent" ? 1 : 0);
+    const wakes = await db.select().from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.reason, "issue_blockers_resolved"));
+    expect(wakes).toHaveLength(kind === "agent" ? 1 : 0);
+    if (kind === "agent") {
+      expect(wakes[0].agentId).toBe(reviewerId);
+      await vi.waitFor(() => expect(mockAdapterExecute).toHaveBeenCalled());
+      expect(mockAdapterExecute).toHaveBeenCalledWith(expect.objectContaining({
+        agent: expect.objectContaining({ id: reviewerId }),
+      }));
+    }
+    expect((await issueService(db).getById(blockedIssueId))?.assigneeAgentId).toBe(agentId);
+    expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, originalReviewWakeId)))[0])
+      .toMatchObject({ status: "skipped", runId: null });
+    // End this isolated fixture before successful-run recovery adds unrelated work.
+    await db.update(issues).set({ status: "done", executionState: null }).where(eq(issues.id, blockedIssueId));
+    await heartbeat.drainActiveRunExecutions();
+  });
+
   it("keeps resolved dependency wake reconciliation active when liveness auto recovery is disabled", async () => {
     const { companyId, agentId, blockedIssueId, blockerIssueId } =
       await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });

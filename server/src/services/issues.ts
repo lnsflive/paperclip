@@ -67,6 +67,7 @@ import {
 } from "@paperclipai/shared";
 import { conflict, HttpError, notFound, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
+import { resolvedDependencyWakeAgent } from "./deferred-issue-wake-priority.js";
 import { parseObject } from "../adapters/utils.js";
 import {
   hydrateSuccessfulRunHandoffLiveness,
@@ -86,7 +87,7 @@ import {
   type ParsedExecutionWorkspaceMode,
 } from "./execution-workspace-policy.js";
 import { mergeExecutionWorkspaceConfig } from "./execution-workspaces.js";
-import { buildInitialIssueMonitorFields, normalizeIssueExecutionPolicy } from "./issue-execution-policy.js";
+import { buildInitialIssueMonitorFields, normalizeIssueExecutionPolicy, parseIssueExecutionState } from "./issue-execution-policy.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { redactCurrentUserText } from "../log-redaction.js";
 import { redactSensitiveText } from "../redaction.js";
@@ -6404,6 +6405,9 @@ export function issueService(db: Db) {
         .select({
           id: issues.id,
           assigneeAgentId: issues.assigneeAgentId,
+          assigneeUserId: issues.assigneeUserId,
+          executionPolicy: issues.executionPolicy,
+          executionState: issues.executionState,
           status: issues.status,
         })
         .from(issueRelations)
@@ -6411,16 +6415,23 @@ export function issueService(db: Db) {
         .where(
           and(
             eq(issueRelations.companyId, blockerIssue.companyId),
+            eq(issues.companyId, blockerIssue.companyId),
             eq(issueRelations.type, "blocks"),
             eq(issueRelations.issueId, blockerIssueId),
           ),
         );
       if (candidates.length === 0) return [];
 
-      const wakeableCandidates = candidates.filter(
-        (candidate) =>
-          candidate.assigneeAgentId && !["backlog", "done", "cancelled"].includes(candidate.status),
-      );
+      const companyAgents = await db.select({ id: agents.id }).from(agents)
+        .where(eq(agents.companyId, blockerIssue.companyId));
+      const companyAgentIds = new Set(companyAgents.map((agent) => agent.id));
+      const wakeableCandidates = candidates.map((candidate) => ({
+        ...candidate, wakeAgentId: resolvedDependencyWakeAgent({
+          ...candidate,
+          executionPolicy: normalizeIssueExecutionPolicy(candidate.executionPolicy),
+          executionState: parseIssueExecutionState(candidate.executionState),
+        }),
+      })).filter((candidate) => candidate.wakeAgentId && companyAgentIds.has(candidate.wakeAgentId));
       if (wakeableCandidates.length === 0) return [];
 
       // Defer to the unified readiness check so that a dependent only fires when
@@ -6442,7 +6453,8 @@ export function issueService(db: Db) {
         .filter(({ readiness }) => readiness.isDependencyReady && readiness.blockerIssueIds.length > 0)
         .map(({ candidate, readiness }) => ({
           id: candidate.id,
-          assigneeAgentId: candidate.assigneeAgentId!,
+          assigneeAgentId: candidate.assigneeAgentId,
+          wakeAgentId: candidate.wakeAgentId!,
           blockerIssueIds: readiness.blockerIssueIds,
         }));
     },

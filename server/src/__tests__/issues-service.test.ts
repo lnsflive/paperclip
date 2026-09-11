@@ -4030,6 +4030,39 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
     ]);
   });
 
+  it.each(["agent", "user", "stale", "foreign"])("routes resolved native-review dependencies to the current %s participant only", async (kind) => {
+    const { companyId, blockerId, dependentId, assigneeAgentId } = await seedSharedWorkspaceDependency();
+    const reviewerId = randomUUID();
+    const reviewerCompanyId = kind === "foreign" ? randomUUID() : companyId;
+    if (kind === "foreign") await db.insert(companies).values({ id: reviewerCompanyId, name: "Other company" });
+    await db.insert(agents).values({
+      id: reviewerId, companyId: reviewerCompanyId, name: "Native reviewer", role: "engineer",
+      status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {},
+    });
+    const stageId = randomUUID();
+    const participant = kind === "user"
+      ? { type: "user" as const, userId: "board" }
+      : { type: "agent" as const, agentId: reviewerId };
+    await db.update(issues).set({
+      status: "in_review",
+      executionPolicy: { mode: "auto", commentRequired: true, stages: [{
+        id: stageId, type: "review", approvalsNeeded: 1,
+        participants: [{ ...participant, id: randomUUID() }],
+      }] },
+      executionState: {
+        status: "pending", currentStageId: kind === "stale" ? randomUUID() : stageId,
+        currentStageIndex: 0, currentStageType: "review", currentParticipant: participant,
+        returnAssignee: { type: "agent", agentId: assigneeAgentId }, completedStageIds: [],
+        reviewRequest: null, lastDecisionId: null, lastDecisionOutcome: null,
+      },
+    }).where(eq(issues.id, dependentId));
+    const recipients = await svc.listWakeableBlockedDependents(blockerId);
+    expect(recipients).toEqual(kind === "agent" ? [{
+      id: dependentId, assigneeAgentId, wakeAgentId: reviewerId, blockerIssueIds: [blockerId],
+    }] : []);
+    expect((await svc.getById(dependentId))?.assigneeAgentId).toBe(assigneeAgentId);
+  });
+
   it("treats done blockers on a shared workspace as ready while a foreign issue is in-flight", async () => {
     const {
       companyId,

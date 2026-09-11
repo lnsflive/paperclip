@@ -203,7 +203,8 @@ describe("issue dependency wakeups in issue routes", () => {
     mockIssueService.listWakeableBlockedDependents.mockResolvedValue([
       {
         id: "issue-2",
-        assigneeAgentId: "agent-2",
+        assigneeAgentId: "saved-developer",
+        wakeAgentId: "agent-2",
         blockerIssueIds: ["issue-1", "issue-3"],
       },
     ]);

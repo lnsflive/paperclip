@@ -892,6 +892,11 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       responsibleUserId: "responsible-user",
       issueNumber: 1,
       identifier: `${issuePrefix}-1`,
+      executionPolicy: {
+        mode: "auto", commentRequired: true,
+        stages: [{ id: stageId, type: "review", approvalsNeeded: 1,
+          participants: [{ id: randomUUID(), type: "agent", agentId }] }],
+      },
       executionState: {
         status: "pending",
         currentStageId: stageId,
