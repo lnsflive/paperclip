@@ -51,11 +51,18 @@ jobs:
       - name: Generate commitperclip token
         id: token
         run: |
-          TOKEN=$(node .github/scripts/get-bot-token.mjs)
-          echo "::add-mask::$TOKEN"
-          echo "value=$TOKEN" >> $GITHUB_OUTPUT
+          if [ -z "$COMMITPERCLIP_KEY" ]; then
+            echo "COMMITPERCLIP_KEY unset; using GITHUB_TOKEN for same-repo review gates"
+            echo "::add-mask::${GITHUB_TOKEN}"
+            echo "value=${GITHUB_TOKEN}" >> "$GITHUB_OUTPUT"
+          else
+            TOKEN=$(node .github/scripts/get-bot-token.mjs)
+            echo "::add-mask::$TOKEN"
+            echo "value=$TOKEN" >> "$GITHUB_OUTPUT"
+          fi
         env:
           COMMITPERCLIP_KEY: ${{ secrets.COMMITPERCLIP_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run quality gates
         id: quality
