@@ -7949,7 +7949,6 @@ export function issueRoutes(
                 status: existing.status,
                 assigneeAgentId: existing.assigneeAgentId,
                 assigneeUserId: existing.assigneeUserId,
-                executionState: existing.executionState,
               },
             },
           );
@@ -7981,7 +7980,6 @@ export function issueRoutes(
             status: existing.status,
             assigneeAgentId: existing.assigneeAgentId,
             assigneeUserId: existing.assigneeUserId,
-            executionState: existing.executionState,
           },
         });
       }
