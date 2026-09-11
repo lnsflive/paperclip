@@ -7942,7 +7942,9 @@ export function issueRoutes(
             },
             tx,
             {
-              expectedUpdatedAt: existing.updatedAt,
+              // Lock recovery and other pre-update writes bump updatedAt. Routing-state
+              // CAS still blocks stale reconciles; timestamp CAS here 409s valid PATCHes.
+              expectedUpdatedAt: undefined,
               expectedRoutingState: {
                 status: existing.status,
                 assigneeAgentId: existing.assigneeAgentId,
@@ -7974,7 +7976,7 @@ export function issueRoutes(
           actorAgentId: actor.agentId ?? null,
           actorUserId: actor.actorType === "user" ? actor.actorId : null,
         }, undefined, {
-          expectedUpdatedAt: existing.updatedAt,
+          expectedUpdatedAt: undefined,
           expectedRoutingState: {
             status: existing.status,
             assigneeAgentId: existing.assigneeAgentId,
