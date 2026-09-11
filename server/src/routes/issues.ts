@@ -7941,16 +7941,6 @@ export function issueRoutes(
               actorUserId: actor.actorType === "user" ? actor.actorId : null,
             },
             tx,
-            {
-              // Lock recovery and other pre-update writes bump updatedAt. Routing-state
-              // CAS still blocks stale reconciles; timestamp CAS here 409s valid PATCHes.
-              expectedUpdatedAt: undefined,
-              expectedRoutingState: {
-                status: existing.status,
-                assigneeAgentId: existing.assigneeAgentId,
-                assigneeUserId: existing.assigneeUserId,
-              },
-            },
           );
           if (!updated) return null;
 
@@ -7974,13 +7964,6 @@ export function issueRoutes(
           ...updateFields,
           actorAgentId: actor.agentId ?? null,
           actorUserId: actor.actorType === "user" ? actor.actorId : null,
-        }, undefined, {
-          expectedUpdatedAt: undefined,
-          expectedRoutingState: {
-            status: existing.status,
-            assigneeAgentId: existing.assigneeAgentId,
-            assigneeUserId: existing.assigneeUserId,
-          },
         });
       }
     } catch (err) {
