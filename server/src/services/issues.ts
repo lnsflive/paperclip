@@ -84,7 +84,12 @@ import {
   type ParsedExecutionWorkspaceMode,
 } from "./execution-workspace-policy.js";
 import { mergeExecutionWorkspaceConfig } from "./execution-workspaces.js";
-import { buildInitialIssueMonitorFields, normalizeIssueExecutionPolicy } from "./issue-execution-policy.js";
+import { assertIssueUpdateSnapshot } from "./issue-update-cas.js";
+import {
+  applyIssueExecutionPolicyTransition,
+  buildInitialIssueMonitorFields,
+  normalizeIssueExecutionPolicy,
+} from "./issue-execution-policy.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { redactCurrentUserText } from "../log-redaction.js";
 import { redactSensitiveText } from "../redaction.js";
@@ -6483,6 +6488,15 @@ export function issueService(db: Db) {
         actorUserId?: string | null;
       },
       dbOrTx: any = db,
+      options?: {
+        expectedUpdatedAt?: Date | string | null;
+        expectedRoutingState?: {
+          status?: string | null;
+          assigneeAgentId?: string | null;
+          assigneeUserId?: string | null;
+          executionState?: typeof issues.$inferSelect["executionState"];
+        };
+      },
     ) => {
       const existing = await dbOrTx
         .select()
@@ -6490,6 +6504,7 @@ export function issueService(db: Db) {
         .where(eq(issues.id, id))
         .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
       if (!existing) return null;
+      assertIssueUpdateSnapshot(existing, options);
 
       const {
         labelIds: nextLabelIds,
@@ -6599,6 +6614,43 @@ export function issueService(db: Db) {
         });
       }
 
+      if (
+        issueData.status === "in_review" &&
+        issueData.executionState === undefined &&
+        issueData.executionPolicy === undefined
+      ) {
+        const existingPolicy = normalizeIssueExecutionPolicy(existing.executionPolicy ?? null);
+        if (existingPolicy) {
+          const transition = applyIssueExecutionPolicyTransition({
+            issue: {
+              status: existing.status,
+              assigneeAgentId: existing.assigneeAgentId,
+              assigneeUserId: existing.assigneeUserId,
+              executionPolicy: existing.executionPolicy,
+              executionState: existing.executionState,
+              monitorNextCheckAt: existing.monitorNextCheckAt,
+              monitorWakeRequestedAt: existing.monitorWakeRequestedAt,
+              monitorLastTriggeredAt: existing.monitorLastTriggeredAt,
+              monitorAttemptCount: existing.monitorAttemptCount,
+              monitorNotes: existing.monitorNotes,
+              monitorScheduledBy: existing.monitorScheduledBy,
+            },
+            policy: existingPolicy,
+            previousPolicy: existingPolicy,
+            requestedStatus: "in_review",
+            requestedAssigneePatch: {
+              assigneeAgentId: issueData.assigneeAgentId,
+              assigneeUserId: issueData.assigneeUserId,
+            },
+            actor: {
+              agentId: actorAgentId ?? null,
+              userId: actorUserId ?? null,
+            },
+          });
+          Object.assign(patch, transition.patch);
+        }
+      }
+
       applyStatusSideEffects(issueData.status, patch);
       if (issueData.status && issueData.status !== "done") {
         patch.completedAt = null;
@@ -6645,10 +6697,43 @@ export function issueService(db: Db) {
         const updated = await tx
           .update(issues)
           .set(patch)
-          .where(eq(issues.id, id))
+          .where(and(
+            eq(issues.id, id),
+            options?.expectedUpdatedAt
+              ? eq(issues.updatedAt, new Date(options.expectedUpdatedAt))
+              : sql`true`,
+            options?.expectedRoutingState?.status !== undefined
+              ? eq(issues.status, options.expectedRoutingState.status ?? existing.status)
+              : sql`true`,
+            options?.expectedRoutingState?.assigneeAgentId !== undefined
+              ? options.expectedRoutingState.assigneeAgentId === null
+                ? isNull(issues.assigneeAgentId)
+                : eq(issues.assigneeAgentId, options.expectedRoutingState.assigneeAgentId)
+              : sql`true`,
+            options?.expectedRoutingState?.assigneeUserId !== undefined
+              ? options.expectedRoutingState.assigneeUserId === null
+                ? isNull(issues.assigneeUserId)
+                : eq(issues.assigneeUserId, options.expectedRoutingState.assigneeUserId)
+              : sql`true`,
+          ))
           .returning()
           .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
-        if (!updated) return null;
+        if (!updated) {
+          if (options?.expectedUpdatedAt || options?.expectedRoutingState) {
+            const current = await tx
+              .select({ id: issues.id })
+              .from(issues)
+              .where(eq(issues.id, id))
+              .then((rows: Array<{ id: string }>) => rows[0] ?? null);
+            if (current) {
+              throw conflict("Issue update conflict", {
+                issueId: id,
+                reason: "stale_snapshot",
+              });
+            }
+          }
+          return null;
+        }
         if (
           (updated.status === "done" || updated.status === "cancelled") &&
           existing.status !== updated.status

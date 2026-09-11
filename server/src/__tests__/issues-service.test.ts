@@ -427,6 +427,228 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
     expect(persisted?.assigneeAgentId).toBe(activeAgentId);
   });
 
+  it("rejects stale snapshot updates with compare-and-set conflict details", async () => {
+    const companyId = await seedAssignableAgentCompany();
+    const assigneeAgentId = randomUUID();
+    await db.insert(agents).values(agentRow(companyId, {
+      id: assigneeAgentId,
+      name: "LiveCoder",
+    }));
+    const issue = await svc.create(companyId, {
+      title: "CAS protected repair",
+      description: null,
+      status: "todo",
+      priority: "medium",
+      assigneeAgentId,
+    });
+
+    const originalUpdatedAt = issue.updatedAt;
+    const repaired = await svc.update(issue.id, { status: "in_progress" });
+    expect(repaired?.status).toBe("in_progress");
+
+    await expect(
+      svc.update(
+        issue.id,
+        { status: "in_review" },
+        undefined,
+        { expectedUpdatedAt: originalUpdatedAt },
+      ),
+    ).rejects.toMatchObject({
+      status: 409,
+      message: "Issue update conflict",
+      details: {
+        issueId: issue.id,
+        reason: "stale_snapshot",
+      },
+    });
+
+    const persisted = await db
+      .select({ status: issues.status, updatedAt: issues.updatedAt })
+      .from(issues)
+      .where(eq(issues.id, issue.id))
+      .then((rows) => rows[0] ?? null);
+    expect(persisted).toMatchObject({
+      status: "in_progress",
+    });
+    expect(persisted?.updatedAt.toISOString()).toBe(repaired?.updatedAt.toISOString());
+  });
+
+  it("rejects stale routing writes even when the updatedAt timestamp is unchanged", async () => {
+    const companyId = await seedAssignableAgentCompany();
+    const coderAgentId = randomUUID();
+    const reviewerAgentId = randomUUID();
+    await db.insert(agents).values([
+      agentRow(companyId, { id: coderAgentId, name: "Coder" }),
+      agentRow(companyId, { id: reviewerAgentId, name: "Reviewer" }),
+    ]);
+    const fixedUpdatedAt = new Date("2026-08-10T10:50:02.498Z");
+    const staleExecutionState = {
+      status: "changes_requested",
+      currentStageId: "bb02dbe0-a6fb-4c86-b922-8b8bfcd428ae",
+      currentStageIndex: 1,
+      currentStageType: "review",
+      currentParticipant: { type: "agent", agentId: reviewerAgentId },
+      returnAssignee: { type: "agent", agentId: coderAgentId },
+      completedStageIds: ["2c52f4cc-9c76-4513-a2f5-cf5cea6e1d4b"],
+      lastDecisionId: "d6746caf-e8ae-4499-8ccf-3fc9533851a5",
+      lastDecisionOutcome: "changes_requested",
+    };
+    const restoredExecutionState = {
+      ...staleExecutionState,
+      status: "pending",
+    };
+    const issue = await svc.create(companyId, {
+      title: "Equal timestamp reconciliation race",
+      description: null,
+      status: "in_progress",
+      priority: "medium",
+      assigneeAgentId: coderAgentId,
+      executionState: staleExecutionState,
+    });
+
+    await db
+      .update(issues)
+      .set({ updatedAt: fixedUpdatedAt })
+      .where(eq(issues.id, issue.id));
+
+    const restored = await svc.update(
+      issue.id,
+      {
+        status: "in_review",
+        assigneeAgentId: reviewerAgentId,
+        executionState: restoredExecutionState,
+      },
+      undefined,
+      {
+        expectedUpdatedAt: fixedUpdatedAt,
+        expectedRoutingState: {
+          status: "in_progress",
+          assigneeAgentId: coderAgentId,
+          assigneeUserId: null,
+          executionState: staleExecutionState,
+        },
+      },
+    );
+    expect(restored?.status).toBe("in_review");
+
+    await db
+      .update(issues)
+      .set({ updatedAt: fixedUpdatedAt })
+      .where(eq(issues.id, issue.id));
+
+    await expect(
+      svc.update(
+        issue.id,
+        {
+          status: "in_progress",
+          assigneeAgentId: coderAgentId,
+          executionState: staleExecutionState,
+        },
+        undefined,
+        {
+          expectedUpdatedAt: fixedUpdatedAt,
+          expectedRoutingState: {
+            status: "in_progress",
+            assigneeAgentId: coderAgentId,
+            assigneeUserId: null,
+            executionState: staleExecutionState,
+          },
+        },
+      ),
+    ).rejects.toMatchObject({
+      status: 409,
+      message: "Issue update conflict",
+      details: {
+        issueId: issue.id,
+        reason: "stale_snapshot",
+      },
+    });
+
+    const persisted = await db
+      .select({
+        status: issues.status,
+        assigneeAgentId: issues.assigneeAgentId,
+        executionState: issues.executionState,
+        updatedAt: issues.updatedAt,
+      })
+      .from(issues)
+      .where(eq(issues.id, issue.id))
+      .then((rows) => rows[0] ?? null);
+    expect(persisted).toMatchObject({
+      status: "in_review",
+      assigneeAgentId: reviewerAgentId,
+      executionState: restoredExecutionState,
+    });
+    expect(persisted?.updatedAt.toISOString()).toBe(fixedUpdatedAt.toISOString());
+  });
+
+  it("reconciles direct in_review restores through the execution policy helper", async () => {
+    const companyId = await seedAssignableAgentCompany();
+    const coderAgentId = randomUUID();
+    const reviewerAgentId = randomUUID();
+    await db.insert(agents).values([
+      agentRow(companyId, { id: coderAgentId, name: "Coder" }),
+      agentRow(companyId, { id: reviewerAgentId, name: "Reviewer" }),
+    ]);
+    const issue = await svc.create(companyId, {
+      title: "Direct restore reconciliation",
+      description: null,
+      status: "in_progress",
+      priority: "medium",
+      assigneeAgentId: coderAgentId,
+      executionPolicy: {
+        mode: "normal",
+        commentRequired: true,
+        stages: [
+          {
+            id: "bb02dbe0-a6fb-4c86-b922-8b8bfcd428ae",
+            type: "review",
+            approvalsNeeded: 1,
+            participants: [
+              {
+                id: "7e13ec36-3d98-4faf-9748-c705aaec4282",
+                type: "agent",
+                agentId: reviewerAgentId,
+                userId: null,
+              },
+            ],
+          },
+        ],
+      },
+      executionState: {
+        status: "changes_requested",
+        currentStageId: "bb02dbe0-a6fb-4c86-b922-8b8bfcd428ae",
+        currentStageIndex: 0,
+        currentStageType: "review",
+        currentParticipant: { type: "agent", agentId: reviewerAgentId },
+        returnAssignee: { type: "agent", agentId: coderAgentId },
+        completedStageIds: ["2c52f4cc-9c76-4513-a2f5-cf5cea6e1d4b"],
+        lastDecisionId: "d6746caf-e8ae-4499-8ccf-3fc9533851a5",
+        lastDecisionOutcome: "changes_requested",
+      },
+    });
+
+    const restored = await svc.update(issue.id, {
+      status: "in_review",
+      actorUserId: "local-board",
+    });
+
+    expect(restored).toMatchObject({
+      status: "in_review",
+      assigneeAgentId: reviewerAgentId,
+      assigneeUserId: null,
+      executionState: {
+        status: "pending",
+        currentStageId: "bb02dbe0-a6fb-4c86-b922-8b8bfcd428ae",
+        currentStageType: "review",
+        currentParticipant: { type: "agent", agentId: reviewerAgentId },
+        returnAssignee: { type: "agent", agentId: coderAgentId },
+        lastDecisionId: "d6746caf-e8ae-4499-8ccf-3fc9533851a5",
+        lastDecisionOutcome: "changes_requested",
+      },
+    });
+  });
+
   it("rejects checkout by a terminated agent before assigning the issue", async () => {
     const companyId = await seedAssignableAgentCompany();
     const terminatedAgentId = randomUUID();
