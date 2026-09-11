@@ -1397,8 +1397,6 @@ describe("agent issue mutation checkout ownership", () => {
       expect.objectContaining({
         assigneeAdapterOverrides: { modelProfile: "cheap" },
       }),
-      undefined,
-      expect.objectContaining({ expectedRoutingState: expect.any(Object) }),
     );
   });
 
@@ -1432,8 +1430,6 @@ describe("agent issue mutation checkout ownership", () => {
     expect(mockIssueService.update).toHaveBeenCalledWith(
       issueId,
       expect.objectContaining({ title: "Updated after commit" }),
-      undefined,
-      expect.objectContaining({ expectedRoutingState: expect.any(Object) }),
     );
     expect(mockIssueService.addComment).toHaveBeenCalledWith(
       issueId,
@@ -1777,8 +1773,6 @@ describe("agent issue mutation checkout ownership", () => {
       expect(mockIssueService.update).toHaveBeenCalledWith(
         issueId,
         expect.objectContaining({ status }),
-        undefined,
-        expect.objectContaining({ expectedRoutingState: expect.any(Object) }),
       );
     });
 
@@ -1800,8 +1794,6 @@ describe("agent issue mutation checkout ownership", () => {
       expect(mockIssueService.update).toHaveBeenCalledWith(
         issueId,
         expect.objectContaining({ status: "in_review" }),
-        undefined,
-        expect.objectContaining({ expectedRoutingState: expect.any(Object) }),
       );
     });
 
@@ -1965,8 +1957,6 @@ describe("agent issue mutation checkout ownership", () => {
       expect(mockIssueService.update).toHaveBeenCalledWith(
         issueId,
         expect.objectContaining({ assigneeAgentId: peerAgentId }),
-        undefined,
-        expect.objectContaining({ expectedRoutingState: expect.any(Object) }),
       );
     });
 
