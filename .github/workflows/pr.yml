@@ -4,6 +4,9 @@ on:
   pull_request:
     branches:
       - master
+      - main
+      - "runtime-v*"
+      - "eco-runtime-v*"
 
 concurrency:
   group: pr-${{ github.event.pull_request.number }}
