@@ -3374,12 +3374,13 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
   }
 
   async function escalateStrandedAssignedIssue(input: Parameters<typeof escalateStrandedAssignedIssueUnlocked>[0]) {
+    // Do not wrap this in an outer transaction. update() already opens its
+    // own tx and takes the advisory lock inside setBlockedBy. Holding an
+    // outer tx across later root-db reads (revalidate, comments, wake) deadlocks
+    // DATABASE_POOL_MAX=1 and leaves the source in_progress.
     return withStrandedRecoveryMutationLock(
       `${input.issue.companyId}:${input.issue.id}`,
-      () => db.transaction(async (tx) => {
-        await lockIssueDependencyMutation(tx, input.issue.companyId, input.issue.id);
-        return escalateStrandedAssignedIssueUnlocked({ ...input, mutationDb: tx });
-      }),
+      () => escalateStrandedAssignedIssueUnlocked(input),
     );
   }
 
