@@ -17,10 +17,25 @@ function timestampMillis(value: Date | string | null | undefined): number | null
   return Number.isFinite(ms) ? ms : null;
 }
 
+function canonicalizeSnapshot(value: unknown): unknown {
+  if (value == null) return null;
+  if (Array.isArray(value)) return value.map(canonicalizeSnapshot);
+  if (typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+      const inner = (value as Record<string, unknown>)[key];
+      if (inner === undefined || inner === null) continue;
+      out[key] = canonicalizeSnapshot(inner);
+    }
+    return out;
+  }
+  return value;
+}
+
 function sameExecutionStateSnapshot(actual: unknown, expected: unknown): boolean {
   if (actual == null && expected == null) return true;
   if (actual == null || expected == null) return false;
-  return JSON.stringify(actual) === JSON.stringify(expected);
+  return JSON.stringify(canonicalizeSnapshot(actual)) === JSON.stringify(canonicalizeSnapshot(expected));
 }
 
 export function assertIssueUpdateSnapshot(
