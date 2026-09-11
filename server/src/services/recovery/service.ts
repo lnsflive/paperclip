@@ -1,4 +1,5 @@
 import { and, asc, desc, eq, gt, gte, inArray, isNull, notInArray, or, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "@paperclipai/db";
 import {
   DEFAULT_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
@@ -27,7 +28,7 @@ import {
 } from "@paperclipai/db";
 import { parseObject, asBoolean, asNumber } from "../../adapters/utils.js";
 import { runningProcesses } from "../../adapters/index.js";
-import { visibleIssueCondition } from "../issue-visibility.js";
+import { visibleIssueCondition, visibleIssueSql } from "../issue-visibility.js";
 import { forbidden, notFound } from "../../errors.js";
 import { logger } from "../../middleware/logger.js";
 import { isPidAlive, isProcessGroupAlive, terminateLocalService } from "../local-service-supervisor.js";
@@ -38,7 +39,7 @@ import { budgetService } from "../budgets.js";
 import { instanceSettingsService } from "../instance-settings.js";
 import { issueRecoveryActionService } from "../issue-recovery-actions.js";
 import { issueTreeControlService } from "../issue-tree-control.js";
-import { TERMINAL_HEARTBEAT_RUN_STATUSES, issueService } from "../issues.js";
+import { lockIssueDependencyMutation, TERMINAL_HEARTBEAT_RUN_STATUSES, issueService } from "../issues.js";
 import {
   applyIssueMonitorPolicyTransition,
   normalizeIssueExecutionPolicy,
@@ -96,6 +97,25 @@ const SESSIONED_LOCAL_ADAPTERS = new Set([
   "opencode_local",
   "pi_local",
 ]);
+
+// Reconciliation can be invoked concurrently by the heartbeat sweep and a
+// terminal-run callback. Serialize the source-scoped recovery mutation so the
+// dependency revalidation and ownership update observe one logical decision.
+const strandedRecoveryMutationTails = new Map<string, Promise<void>>();
+
+async function withStrandedRecoveryMutationLock<T>(key: string, work: () => Promise<T>): Promise<T> {
+  const previous = strandedRecoveryMutationTails.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => { release = resolve; });
+  strandedRecoveryMutationTails.set(key, current);
+  await previous;
+  try {
+    return await work();
+  } finally {
+    release();
+    if (strandedRecoveryMutationTails.get(key) === current) strandedRecoveryMutationTails.delete(key);
+  }
+}
 
 // GGU-809: when a stranded `in_progress` issue would otherwise hit the
 // `isRepeatedProductiveContinuationRecovery` escalation path, exempt the
@@ -3142,7 +3162,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     return updated;
   }
 
-  async function escalateStrandedAssignedIssue(input: {
+  async function escalateStrandedAssignedIssueUnlocked(input: {
     issue: typeof issues.$inferSelect;
     previousStatus: StrandedPreviousStatus;
     latestRun: LatestIssueRun;
@@ -3150,7 +3170,9 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     recoveryCause?: StrandedRecoveryCause;
     recoveryOwnerAgentId?: string | null;
     successfulRunHandoffEvidence?: SuccessfulRunHandoffRecoveryEvidence | null;
+    mutationDb?: any;
   }) {
+    const mutationIssuesSvc = issueService(input.mutationDb ?? db);
     if (isStrandedIssueRecoveryIssue(input.issue)) {
       return escalateStrandedRecoveryIssueInPlace({
         issue: input.issue,
@@ -3159,7 +3181,29 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       });
     }
 
+    // The liveness scan intentionally works from a snapshot. Revalidate at the
+    // mutation boundary as a blocker resolution can race a later reconciliation
+    // after the prior source-scoped action was resolved. In that case the stale
+    // cancelled dependency-wait run must not recreate recovery or rotate the
+    // source owner.
+    const currentIssue = await db
+      .select()
+      .from(issues)
+      .where(and(eq(issues.companyId, input.issue.companyId), eq(issues.id, input.issue.id)))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+    if (!currentIssue || ["done", "cancelled"].includes(currentIssue.status)) return null;
     const recoveryCause = resolveStrandedRecoveryCause(input.latestRun, input.recoveryCause);
+    // Only suppress stranded recreation for a live dependency wait. Other
+    // recovery causes (workspace validation, process-lost, adapter failure)
+    // must still escalate even when a blocker edge already exists.
+    if (
+      input.latestRun?.errorCode === "issue_dependencies_blocked" &&
+      await hasUnresolvedFirstClassBlocker(currentIssue)
+    ) {
+      return null;
+    }
+
     const recoveryAction = await ensureSourceScopedStrandedRecoveryAction({
       issue: input.issue,
       previousStatus: input.previousStatus,
@@ -3180,7 +3224,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       });
     }
     const blockerIds = await existingUnresolvedBlockerIssueIds(input.issue.companyId, input.issue.id);
-    const updated = await issuesSvc.update(input.issue.id, {
+    const updated = await mutationIssuesSvc.update(input.issue.id, {
       status: "blocked",
       blockedByIssueIds: blockerIds,
       assigneeAgentId: recoveryAction.ownerAgentId ?? input.issue.assigneeAgentId,
@@ -3247,13 +3291,13 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
 
       if (!hasEscalationComment) {
         if (notice) {
-          await issuesSvc.addComment(input.issue.id, notice.body, {}, {
+          await mutationIssuesSvc.addComment(input.issue.id, notice.body, {}, {
             authorType: "system",
             presentation: notice.presentation,
             metadata: notice.metadata,
           });
         } else {
-          await issuesSvc.addComment(input.issue.id, `${input.comment ?? ""}${recoveryLine}`, {}, {
+          await mutationIssuesSvc.addComment(input.issue.id, `${input.comment ?? ""}${recoveryLine}`, {}, {
             authorType: "system",
           });
         }
@@ -3317,7 +3361,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         (currentIssue.status !== "blocked" ||
           currentIssue.assigneeAgentId !== recoveryAction.ownerAgentId)
       ) {
-        const reblocked = await issuesSvc.update(input.issue.id, {
+        const reblocked = await mutationIssuesSvc.update(input.issue.id, {
           status: "blocked",
           blockedByIssueIds: blockerIds,
           assigneeAgentId: recoveryAction.ownerAgentId,
@@ -3327,6 +3371,17 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     }
 
     return updated;
+  }
+
+  async function escalateStrandedAssignedIssue(input: Parameters<typeof escalateStrandedAssignedIssueUnlocked>[0]) {
+    // Do not wrap this in an outer transaction. update() already opens its
+    // own tx and takes the advisory lock inside setBlockedBy. Holding an
+    // outer tx across later root-db reads (revalidate, comments, wake) deadlocks
+    // DATABASE_POOL_MAX=1 and leaves the source in_progress.
+    return withStrandedRecoveryMutationLock(
+      `${input.issue.companyId}:${input.issue.id}`,
+      () => escalateStrandedAssignedIssueUnlocked(input),
+    );
   }
 
   async function persistAdapterFailureRecoveryClassification(
@@ -3451,6 +3506,34 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     return participant?.type === "agent" ? participant.agentId : null;
   }
 
+  async function hasUnresolvedFirstClassBlocker(issue: typeof issues.$inferSelect) {
+    try {
+      const blocker = await db
+        .select({ id: issueRelations.issueId })
+        .from(issueRelations)
+        .innerJoin(issues, eq(issues.id, issueRelations.issueId))
+        .where(
+          and(
+            eq(issueRelations.companyId, issue.companyId),
+            eq(issueRelations.relatedIssueId, issue.id),
+            eq(issueRelations.type, "blocks"),
+            eq(issues.companyId, issue.companyId),
+            sql.raw(visibleIssueSql("issues")),
+            notInArray(issues.status, ["done", "cancelled"]),
+          ),
+        )
+        .limit(1)
+        // A terminal-run callback may be holding the issue row while it writes
+        // the dependency-blocked verdict. Do not wait behind that mutation:
+        // an uncertain blocker read is conservatively treated as a live wait.
+        .for("key share", { of: issues, noWait: true });
+      return blocker.length > 0;
+    } catch (error) {
+      if ((error as { code?: string })?.code === "55P03") return true;
+      throw error;
+    }
+  }
+
   function hasPendingProviderQuotaRecoveryMonitor(
     issue: typeof issues.$inferSelect,
     latestRun: LatestIssueRun,
@@ -3553,6 +3636,16 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         ? participantLatestRunForRecovery
         : latestRun;
       if (hasPendingProviderQuotaRecoveryMonitor(issue, providerQuotaMonitorRun, recoveryNow)) {
+        result.skipped += 1;
+        continue;
+      }
+      // An unresolved first-class blocker is the authoritative live wait path
+      // only for cancelled dependency-wait runs. Do not skip workspace
+      // validation or other stranded causes just because a blocker exists.
+      if (
+        latestRun?.errorCode === "issue_dependencies_blocked" &&
+        await hasUnresolvedFirstClassBlocker(issue)
+      ) {
         result.skipped += 1;
         continue;
       }
@@ -4142,6 +4235,8 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         ),
       ));
 
+    const blockerIssues = alias(issues, "liveness_blocker_issue");
+    const blockedIssues = alias(issues, "liveness_blocked_issue");
     const [
       issueRows,
       relationRows,
@@ -4162,7 +4257,15 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           blockedIssueId: issueRelations.relatedIssueId,
         })
         .from(issueRelations)
-        .where(eq(issueRelations.type, "blocks")),
+        .innerJoin(blockerIssues, eq(issueRelations.issueId, blockerIssues.id))
+        .innerJoin(blockedIssues, eq(issueRelations.relatedIssueId, blockedIssues.id))
+        .where(and(
+          eq(issueRelations.type, "blocks"),
+          eq(issueRelations.companyId, blockerIssues.companyId),
+          eq(issueRelations.companyId, blockedIssues.companyId),
+          sql.raw(visibleIssueSql("liveness_blocker_issue")),
+          sql.raw(visibleIssueSql("liveness_blocked_issue")),
+        )),
       db
         .select({
           id: agents.id,
@@ -4194,7 +4297,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         .innerJoin(heartbeatRuns, eq(issues.executionRunId, heartbeatRuns.id))
         .where(
           and(
-            visibleIssueCondition(),
+            sql.raw(visibleIssueSql("issues")),
             notInArray(issues.originKind, [RECOVERY_ORIGIN_KINDS.issueGraphLivenessEscalation]),
             inArray(heartbeatRuns.status, [...EXECUTION_PATH_HEARTBEAT_RUN_STATUSES]),
           ),
@@ -4751,7 +4854,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     return updated;
   }
 
-  async function createIssueGraphLivenessEscalation(input: {
+  async function createIssueGraphLivenessEscalationUnlocked(input: {
     finding: IssueLivenessFinding;
     runId?: string | null;
     now: Date;
@@ -4760,9 +4863,34 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     const issue = await db
       .select()
       .from(issues)
-      .where(eq(issues.id, input.finding.issueId))
+      .where(and(eq(issues.id, input.finding.issueId), eq(issues.companyId, input.finding.companyId), visibleIssueCondition()))
       .then((rows) => rows[0] ?? null);
     if (!issue || issue.companyId !== input.finding.companyId) return { kind: "skipped" as const };
+    // Reconcile findings are advisory snapshots. Revalidate the exact source
+    // and leaf blocker at the mutation boundary so a concurrent resolution or
+    // status transition cannot create a recovery from stale candidate state.
+    const dependencyPath = input.finding.dependencyPath;
+    const sourceSnapshot = dependencyPath[0];
+    if (!sourceSnapshot || issue.status !== sourceSnapshot.status) return { kind: "skipped" as const };
+    for (let index = 1; index < dependencyPath.length; index += 1) {
+      const parent = dependencyPath[index - 1];
+      const child = dependencyPath[index];
+      const edge = await db
+        .select({ id: issueRelations.issueId })
+        .from(issueRelations)
+        .innerJoin(issues, eq(issueRelations.issueId, issues.id))
+        .where(and(
+          eq(issueRelations.companyId, issue.companyId),
+          eq(issueRelations.type, "blocks"),
+          eq(issueRelations.relatedIssueId, parent.issueId),
+          eq(issueRelations.issueId, child.issueId),
+          eq(issues.companyId, issue.companyId),
+          eq(issues.status, child.status),
+          sql.raw(visibleIssueSql("issues")),
+        ))
+        .limit(1);
+      if (edge.length === 0) return { kind: "skipped" as const };
+    }
     if (await isAutomaticRecoverySuppressedByPauseHold(db, issue.companyId, issue.id, treeControlSvc)) {
       return { kind: "skipped" as const };
     }
@@ -4925,6 +5053,18 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     }, "created issue graph liveness escalation");
 
     return { kind: "created" as const, escalationIssueId: escalation.id };
+  }
+
+  // Keep source revalidation, uniqueness checks, first-blocker creation, and
+  // ownership handoff as one logical mutation when the sweep and terminal
+  // callback reconcile the same source concurrently.
+  async function createIssueGraphLivenessEscalation(
+    input: Parameters<typeof createIssueGraphLivenessEscalationUnlocked>[0],
+  ) {
+    return withStrandedRecoveryMutationLock(
+      `${input.finding.companyId}:${input.finding.issueId}`,
+      () => createIssueGraphLivenessEscalationUnlocked(input),
+    );
   }
 
   async function reconcileResolvedDependencyWakeBackstop(opts?: ResolvedDependencyWakeBackstopOptions) {
