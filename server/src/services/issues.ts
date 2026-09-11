@@ -84,6 +84,7 @@ import {
   type ParsedExecutionWorkspaceMode,
 } from "./execution-workspace-policy.js";
 import { mergeExecutionWorkspaceConfig } from "./execution-workspaces.js";
+import { assertIssueUpdateSnapshot } from "./issue-update-cas.js";
 import {
   applyIssueExecutionPolicyTransition,
   buildInitialIssueMonitorFields,
@@ -6493,6 +6494,7 @@ export function issueService(db: Db) {
         .where(eq(issues.id, id))
         .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
       if (!existing) return null;
+      assertIssueUpdateSnapshot(existing, options);
 
       const {
         labelIds: nextLabelIds,
@@ -6703,16 +6705,11 @@ export function issueService(db: Db) {
                 ? isNull(issues.assigneeUserId)
                 : eq(issues.assigneeUserId, options.expectedRoutingState.assigneeUserId)
               : sql`true`,
-            options?.expectedRoutingState?.executionState !== undefined
-              ? options.expectedRoutingState.executionState === null
-                ? isNull(issues.executionState)
-                : eq(issues.executionState, options.expectedRoutingState.executionState)
-              : sql`true`,
           ))
           .returning()
           .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
         if (!updated) {
-          if (options?.expectedUpdatedAt) {
+          if (options?.expectedUpdatedAt || options?.expectedRoutingState) {
             const current = await tx
               .select({ id: issues.id })
               .from(issues)
