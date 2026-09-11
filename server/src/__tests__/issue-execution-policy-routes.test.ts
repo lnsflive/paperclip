@@ -294,12 +294,11 @@ describe("issue execution policy routes", () => {
     expect(mockIssueService.update.mock.calls[0]?.[0]).toBe("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
     expect(mockIssueService.update.mock.calls[0]?.[1]).toEqual(expect.objectContaining({ status: "in_review" }));
     expect(mockIssueService.update.mock.calls[0]?.[3]).toEqual({
-      expectedUpdatedAt: issue.updatedAt,
+      expectedUpdatedAt: undefined,
       expectedRoutingState: {
         status: issue.status,
         assigneeAgentId: issue.assigneeAgentId,
         assigneeUserId: issue.assigneeUserId,
-        executionState: issue.executionState,
       },
     });
   });
@@ -354,12 +353,11 @@ describe("issue execution policy routes", () => {
       }),
     }));
     expect(mockIssueService.update.mock.calls[0]?.[3]).toEqual({
-      expectedUpdatedAt: issue.updatedAt,
+      expectedUpdatedAt: undefined,
       expectedRoutingState: {
         status: issue.status,
         assigneeAgentId: issue.assigneeAgentId,
         assigneeUserId: issue.assigneeUserId,
-        executionState: issue.executionState,
       },
     });
   });
@@ -413,12 +411,11 @@ describe("issue execution policy routes", () => {
       monitorNextCheckAt: new Date("2026-12-01T12:00:00.000Z"),
     }));
     expect(mockIssueService.update.mock.calls[0]?.[3]).toEqual({
-      expectedUpdatedAt: issue.updatedAt,
+      expectedUpdatedAt: undefined,
       expectedRoutingState: {
         status: issue.status,
         assigneeAgentId: issue.assigneeAgentId,
         assigneeUserId: issue.assigneeUserId,
-        executionState: issue.executionState,
       },
     });
   });
@@ -451,12 +448,11 @@ describe("issue execution policy routes", () => {
     expect(mockIssueThreadInteractionService.listForIssue).not.toHaveBeenCalled();
     expect(mockIssueApprovalService.listApprovalsForIssue).not.toHaveBeenCalled();
     expect(mockIssueService.update.mock.calls[0]?.[3]).toEqual({
-      expectedUpdatedAt: issue.updatedAt,
+      expectedUpdatedAt: undefined,
       expectedRoutingState: {
         status: issue.status,
         assigneeAgentId: issue.assigneeAgentId,
         assigneeUserId: issue.assigneeUserId,
-        executionState: issue.executionState,
       },
     });
   });
@@ -501,12 +497,11 @@ describe("issue execution policy routes", () => {
       actorUserId: "local-board",
     }));
     expect(mockIssueService.update.mock.calls[0]?.[3]).toEqual({
-      expectedUpdatedAt: issue.updatedAt,
+      expectedUpdatedAt: undefined,
       expectedRoutingState: {
         status: issue.status,
         assigneeAgentId: issue.assigneeAgentId,
         assigneeUserId: issue.assigneeUserId,
-        executionState: issue.executionState,
       },
     });
     const updatePatch = mockIssueService.update.mock.calls[0]?.[1] as Record<string, unknown>;
