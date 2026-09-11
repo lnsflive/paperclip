@@ -3,9 +3,23 @@ name: commitperclip PR Review
 on:
   pull_request_target:
     types: [opened, synchronize, reopened]
+    branches:
+      - master
+      - main
+      - "runtime-v*"
+      - "eco-runtime-v*"
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - master
+      - main
+      - "runtime-v*"
+      - "eco-runtime-v*"
 
 # Always runs from base branch context — never executes PR code.
 # pull_request_target gives access to secrets for untrusted fork PRs.
+# pull_request is included so a PR that adds `main` (or other bases) to this
+# filter can run the new definition before it exists on the base branch.
 
 permissions:
   pull-requests: write
@@ -21,7 +35,7 @@ jobs:
       - name: Checkout base branch (never PR code)
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: master
+          ref: ${{ github.event.pull_request.base.ref }}
 
       - name: Dependency Review
         uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
@@ -37,11 +51,18 @@ jobs:
       - name: Generate commitperclip token
         id: token
         run: |
-          TOKEN=$(node .github/scripts/get-bot-token.mjs)
-          echo "::add-mask::$TOKEN"
-          echo "value=$TOKEN" >> $GITHUB_OUTPUT
+          if [ -z "$COMMITPERCLIP_KEY" ]; then
+            echo "COMMITPERCLIP_KEY unset; using GITHUB_TOKEN for same-repo review gates"
+            echo "::add-mask::${GITHUB_TOKEN}"
+            echo "value=${GITHUB_TOKEN}" >> "$GITHUB_OUTPUT"
+          else
+            TOKEN=$(node .github/scripts/get-bot-token.mjs)
+            echo "::add-mask::$TOKEN"
+            echo "value=$TOKEN" >> "$GITHUB_OUTPUT"
+          fi
         env:
           COMMITPERCLIP_KEY: ${{ secrets.COMMITPERCLIP_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run quality gates
         id: quality
