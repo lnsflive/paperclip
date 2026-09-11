@@ -3193,11 +3193,17 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       .limit(1)
       .then((rows) => rows[0] ?? null);
     if (!currentIssue || ["done", "cancelled"].includes(currentIssue.status)) return null;
-    if (await hasUnresolvedFirstClassBlocker(currentIssue)) {
+    const recoveryCause = resolveStrandedRecoveryCause(input.latestRun, input.recoveryCause);
+    // Only suppress stranded recreation for a live dependency wait. Other
+    // recovery causes (workspace validation, process-lost, adapter failure)
+    // must still escalate even when a blocker edge already exists.
+    if (
+      input.latestRun?.errorCode === "issue_dependencies_blocked" &&
+      await hasUnresolvedFirstClassBlocker(currentIssue)
+    ) {
       return null;
     }
 
-    const recoveryCause = resolveStrandedRecoveryCause(input.latestRun, input.recoveryCause);
     const recoveryAction = await ensureSourceScopedStrandedRecoveryAction({
       issue: input.issue,
       previousStatus: input.previousStatus,
@@ -3285,13 +3291,13 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
 
       if (!hasEscalationComment) {
         if (notice) {
-          await issuesSvc.addComment(input.issue.id, notice.body, {}, {
+          await mutationIssuesSvc.addComment(input.issue.id, notice.body, {}, {
             authorType: "system",
             presentation: notice.presentation,
             metadata: notice.metadata,
           });
         } else {
-          await issuesSvc.addComment(input.issue.id, `${input.comment ?? ""}${recoveryLine}`, {}, {
+          await mutationIssuesSvc.addComment(input.issue.id, `${input.comment ?? ""}${recoveryLine}`, {}, {
             authorType: "system",
           });
         }
@@ -3632,10 +3638,13 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         result.skipped += 1;
         continue;
       }
-      // An unresolved first-class blocker is the authoritative live wait path.
-      // Do not let cancelled dependency-wait runs or stale run/status evidence
-      // recreate stranded recovery or rotate ownership.
-      if (await hasUnresolvedFirstClassBlocker(issue)) {
+      // An unresolved first-class blocker is the authoritative live wait path
+      // only for cancelled dependency-wait runs. Do not skip workspace
+      // validation or other stranded causes just because a blocker exists.
+      if (
+        latestRun?.errorCode === "issue_dependencies_blocked" &&
+        await hasUnresolvedFirstClassBlocker(issue)
+      ) {
         result.skipped += 1;
         continue;
       }
