@@ -418,8 +418,9 @@ describe.sequential("issue comment reopen routes", () => {
         actorAgentId: null,
         actorUserId: "local-board",
       }),
-    ,
-      expect.anything());
+      expect.anything(),
+      expect.anything(),
+    );
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
@@ -451,8 +452,9 @@ describe.sequential("issue comment reopen routes", () => {
       expect.objectContaining({
         assigneeAgentId: "33333333-3333-4333-8333-333333333333",
       }),
-    ,
-      expect.anything());
+      expect.anything(),
+      expect.anything(),
+    );
   });
 
   it("rejects ambiguous assignee shortnames", async () => {
@@ -498,8 +500,9 @@ describe.sequential("issue comment reopen routes", () => {
         actorAgentId: null,
         actorUserId: "local-board",
       }),
-    ,
-      expect.anything());
+      expect.anything(),
+      expect.anything(),
+    );
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
@@ -528,8 +531,9 @@ describe.sequential("issue comment reopen routes", () => {
     expect(mockIssueService.update).toHaveBeenCalledWith(
       "11111111-1111-4111-8111-111111111111",
       { status: "todo" },
-    ,
-      expect.anything());
+      expect.anything(),
+      expect.anything(),
+    );
     await waitForWakeup(() => expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
       "22222222-2222-4222-8222-222222222222",
       expect.objectContaining({
@@ -808,8 +812,9 @@ describe.sequential("issue comment reopen routes", () => {
         assigneeAgentId: otherAgentId,
         status: "todo",
       }),
-    ,
-      expect.anything());
+      expect.anything(),
+      expect.anything(),
+    );
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
@@ -838,8 +843,9 @@ describe.sequential("issue comment reopen routes", () => {
     expect(mockIssueService.update).toHaveBeenCalledWith(
       "11111111-1111-4111-8111-111111111111",
       { status: "todo" },
-    ,
-      expect.anything());
+      expect.anything(),
+      expect.anything(),
+    );
     await waitForWakeup(() => expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
       "22222222-2222-4222-8222-222222222222",
       expect.objectContaining({
@@ -897,8 +903,9 @@ describe.sequential("issue comment reopen routes", () => {
     expect(mockIssueService.update).toHaveBeenCalledWith(
       "11111111-1111-4111-8111-111111111111",
       { status: "todo" },
-    ,
-      expect.anything());
+      expect.anything(),
+      expect.anything(),
+    );
     expect(mockHeartbeatService.cancelRun).toHaveBeenCalledWith("retry-run-1");
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),
@@ -1189,8 +1196,9 @@ describe.sequential("issue comment reopen routes", () => {
     expect(mockIssueService.update).toHaveBeenCalledWith(
       "11111111-1111-4111-8111-111111111111",
       { status: "todo" },
-    ,
-      expect.anything());
+      expect.anything(),
+      expect.anything(),
+    );
   });
 
   it("does not implicitly reopen done issues via the PATCH comment path when actor runId matches the issue's checkout run", async () => {
@@ -1242,8 +1250,9 @@ describe.sequential("issue comment reopen routes", () => {
         actorAgentId: null,
         actorUserId: "local-board",
       }),
-    ,
-      expect.anything());
+      expect.anything(),
+      expect.anything(),
+    );
     await waitForWakeup(() => expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
       "22222222-2222-4222-8222-222222222222",
       expect.objectContaining({
@@ -1299,8 +1308,9 @@ describe.sequential("issue comment reopen routes", () => {
         actorAgentId: null,
         actorUserId: "local-board",
       }),
-    ,
-      expect.anything());
+      expect.anything(),
+      expect.anything(),
+    );
     expect(mockHeartbeatService.cancelRun).toHaveBeenCalledWith("retry-run-1");
     await waitForWakeup(() => expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
       "22222222-2222-4222-8222-222222222222",
@@ -1408,8 +1418,9 @@ describe.sequential("issue comment reopen routes", () => {
         actorAgentId: null,
         actorUserId: "local-board",
       }),
-    ,
-      expect.anything());
+      expect.anything(),
+      expect.anything(),
+    );
     expect(mockIssueService.update).not.toHaveBeenCalledWith(
       "11111111-1111-4111-8111-111111111111",
       expect.objectContaining({ status: "todo" }),
@@ -1505,8 +1516,9 @@ describe.sequential("issue comment reopen routes", () => {
         actorAgentId: "22222222-2222-4222-8222-222222222222",
         actorUserId: null,
       }),
-    ,
-      expect.anything());
+      expect.anything(),
+      expect.anything(),
+    );
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
@@ -1559,8 +1571,9 @@ describe.sequential("issue comment reopen routes", () => {
     expect(mockIssueService.update).toHaveBeenCalledWith(
       "11111111-1111-4111-8111-111111111111",
       { status: "todo" },
-    ,
-      expect.anything());
+      expect.anything(),
+      expect.anything(),
+    );
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
@@ -1822,6 +1835,7 @@ describe.sequential("issue comment reopen routes", () => {
         }),
       }),
       mockTx,
+      expect.anything(),
     );
     const updatePatch = mockIssueService.update.mock.calls[0]?.[1] as Record<string, any>;
     const decisionId = updatePatch.executionState.lastDecisionId;
@@ -1917,6 +1931,7 @@ describe.sequential("issue comment reopen routes", () => {
         }),
       }),
       mockTx,
+      expect.anything(),
     );
   });
 
@@ -2002,6 +2017,7 @@ describe.sequential("issue comment reopen routes", () => {
         }),
       }),
       mockTx,
+      expect.anything(),
     );
   });
 
@@ -2611,7 +2627,8 @@ describe.sequential("issue comment reopen routes", () => {
         "11111111-1111-4111-8111-111111111111",
         expect.objectContaining({ status: "done" }),
         mockTx,
-      );
+      expect.anything(),
+    );
       expect(mockLogActivity).toHaveBeenCalledWith(
         expect.anything(),
         expect.objectContaining({
