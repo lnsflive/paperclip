@@ -473,6 +473,32 @@ function stageHasParticipant(stage: IssueExecutionStage, participant: IssueExecu
   return stage.participants.some((candidate) => principalsEqual(candidate, participant));
 }
 
+function selectNextStageParticipantAfterApproval(input: {
+  nextStage: IssueExecutionStage;
+  preferred: IssueExecutionStagePrincipal | null;
+  returnAssignee: IssueExecutionStagePrincipal | null;
+  previousDecisionOutcome: IssueExecutionState["lastDecisionOutcome"] | null | undefined;
+}) {
+  const participant = selectStageParticipant(input.nextStage, {
+    preferred: input.preferred,
+    exclude: input.returnAssignee,
+  });
+  if (participant) return participant;
+
+  // A previously returned review chain may legitimately re-enter a later stage
+  // owned by the same preserved assignee. Keep this recovery path explicit and
+  // limited to post-approval routing after changes were requested.
+  if (
+    input.previousDecisionOutcome === "changes_requested" &&
+    input.returnAssignee &&
+    stageHasParticipant(input.nextStage, input.returnAssignee)
+  ) {
+    return input.returnAssignee;
+  }
+
+  return null;
+}
+
 function patchForPrincipal(principal: IssueExecutionStagePrincipal | null) {
   if (!principal) {
     return { assigneeAgentId: null, assigneeUserId: null };
@@ -731,9 +757,11 @@ function applyIssueExecutionStageTransition(input: TransitionInput): TransitionR
           };
         }
 
-        const participant = selectStageParticipant(nextStage, {
+        const participant = selectNextStageParticipantAfterApproval({
+          nextStage,
           preferred: explicitAssignee,
-          exclude: existingState?.returnAssignee ?? null,
+          returnAssignee: existingState?.returnAssignee ?? currentAssignee ?? actor,
+          previousDecisionOutcome: existingState?.lastDecisionOutcome,
         });
         if (!participant) {
           throw unprocessable(`No eligible ${nextStage.type} participant is configured for this issue`);
