@@ -5823,6 +5823,27 @@ registerCurrentRoute({
 
 registerCurrentRoute({
   method: "post",
+  path: "/api/issues/{id}/execution-projection/terminalize",
+  tags: ["issues"],
+  summary: "Terminalize the supported orphan execution projection with an audited compare-and-set",
+  body: z.object({
+    recoveryActionId: z.string().trim().min(1),
+    reason: z.string().trim().min(1),
+    evidencePointers: z.array(z.string().trim().min(1)).min(1),
+    expectedExecutionState: z.record(z.string(), z.unknown()),
+  }),
+  responses: {
+    200: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    409: r.conflict,
+  },
+});
+
+registerCurrentRoute({
+  method: "post",
   path: "/api/issues/{id}/scheduled-retry/retry-now",
   tags: ["issues"],
   summary: "Retry a scheduled issue run now",
