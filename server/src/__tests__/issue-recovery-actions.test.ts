@@ -349,7 +349,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(enqueueWakeup).not.toHaveBeenCalled();
   });
 
-  it("does not overwrite a restored pending reviewer on a later reconciliation", async () => {
+  it.each(["failed", "succeeded"] as const)("does not overwrite a restored pending reviewer on a later reconciliation (%s run)", async (runStatus) => {
     const { companyId, managerId, coderId, reviewerId, sourceIssueId, prefix } = await seedCompany();
     const unrelatedIssueId = randomUUID();
     await db.insert(issues).values({
@@ -392,7 +392,10 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     const enqueueWakeup = vi.fn()
       .mockResolvedValueOnce(null)
       .mockResolvedValue({ id: randomUUID() } as never);
-    const recovery = recoveryService(db, { enqueueWakeup });
+    const scheduleRecoveryRetry = vi.fn()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValue({ id: randomUUID() } as never);
+    const recovery = recoveryService(db, { enqueueWakeup, scheduleRecoveryRetry });
     expect((await recovery.reconcileStrandedAssignedIssues()).changesRequestedRepaired).toBe(2);
 
     await db.update(issues).set({
@@ -421,32 +424,49 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       returnAssignee: { type: "agent", agentId: managerId },
     });
 
+    const reviewerRunId = randomUUID();
     await db.insert(heartbeatRuns).values({
-      id: randomUUID(),
+      id: reviewerRunId,
       companyId,
       agentId: reviewerId,
       invocationSource: "automation",
-      status: "failed",
-      error: "review process exited unexpectedly",
-      errorCode: "adapter_failed",
+      status: runStatus,
+      error: runStatus === "failed" ? "review process failed before dispatch" : null,
+      errorCode: runStatus === "failed" ? "adapter_failed" : null,
+      // A failed run is retryable only with evidence that provider work did
+      // not start; unknown action outcomes belong to reconciliation.
+      resultJson: runStatus === "failed"
+        ? { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } }
+        : null,
       startedAt: new Date("2026-07-15T20:00:00.000Z"),
       finishedAt: new Date("2026-07-15T20:01:00.000Z"),
       contextSnapshot: { issueId: sourceIssueId },
     });
     const firstPostRestore = await recovery.reconcileStrandedAssignedIssues();
     expect(firstPostRestore.changesRequestedRepaired).toBe(0);
+    expect(firstPostRestore.reviewParticipantRequeued).toBe(0);
     expect(enqueueWakeup).not.toHaveBeenCalledWith(managerId, expect.anything());
-    const wakeCount = enqueueWakeup.mock.calls.length;
+    const dispatch = runStatus === "failed" ? scheduleRecoveryRetry : enqueueWakeup;
+    expect(dispatch).toHaveBeenCalledTimes(1);
 
     const secondPostRestore = await recovery.reconcileStrandedAssignedIssues();
-    // A null enqueue result is deferred, not a durable wake. The next scan
-    // must remain eligible to retry recovery and count only the durable wake.
+    // A deferred dispatch must remain eligible for the next scan, through
+    // either the bounded failure retry scheduler or the successful-run wake.
     expect(secondPostRestore.reviewParticipantRequeued).toBe(1);
     expect(secondPostRestore.changesRequestedRepaired).toBe(0);
-    expect(enqueueWakeup).toHaveBeenCalledTimes(wakeCount + 1);
+    expect(dispatch).toHaveBeenCalledTimes(2);
+    if (runStatus === "failed") {
+      expect(scheduleRecoveryRetry).toHaveBeenLastCalledWith(reviewerRunId);
+      expect(enqueueWakeup).not.toHaveBeenCalled();
+    } else {
+      expect(enqueueWakeup).toHaveBeenLastCalledWith(reviewerId, expect.anything());
+      expect(scheduleRecoveryRetry).not.toHaveBeenCalled();
+    }
+    expect((await recovery.reconcileStrandedAssignedIssues()).reviewParticipantRequeued).toBe(0);
+    expect(dispatch).toHaveBeenCalledTimes(2);
   });
 
-  it("rejects a stale repair candidate restored to a pending reviewer before CAS", async () => {
+  it.each(["failed", "succeeded"] as const)("rejects a stale repair candidate restored to a pending reviewer before CAS (%s run)", async (runStatus) => {
     const { managerId, coderId, reviewerId, sourceIssueId } = await seedCompany();
     const stageId = randomUUID();
     const decisionId = randomUUID();
@@ -483,7 +503,8 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     });
 
     const enqueueWakeup = vi.fn(async () => ({ id: randomUUID() } as never));
-    const recovery = recoveryService(db, { enqueueWakeup });
+    const scheduleRecoveryRetry = vi.fn(async () => ({ id: randomUUID() } as never));
+    const recovery = recoveryService(db, { enqueueWakeup, scheduleRecoveryRetry });
     const result = await recovery.reconcileStrandedAssignedIssues({
       beforeRepair: async (candidate) => {
         if (candidate.id !== sourceIssueId) return;
@@ -521,10 +542,15 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       .map((comment) => comment.body))
       .toEqual(["protected review evidence"]);
 
+    const reviewerRunId = randomUUID();
     await db.insert(heartbeatRuns).values({
-      id: randomUUID(), companyId: after!.companyId, agentId: reviewerId,
-      invocationSource: "automation", status: "failed",
-      error: "review process exited unexpectedly", errorCode: "adapter_failed",
+      id: reviewerRunId, companyId: after!.companyId, agentId: reviewerId,
+      invocationSource: "automation", status: runStatus,
+      error: runStatus === "failed" ? "review process failed before dispatch" : null,
+      errorCode: runStatus === "failed" ? "adapter_failed" : null,
+      resultJson: runStatus === "failed"
+        ? { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } }
+        : null,
       startedAt: new Date("2026-07-15T20:00:00.000Z"),
       finishedAt: new Date("2026-07-15T20:01:00.000Z"),
       contextSnapshot: { issueId: sourceIssueId },
@@ -533,14 +559,21 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     const wakePass = await recovery.reconcileStrandedAssignedIssues();
     expect(wakePass.changesRequestedRepaired).toBe(0);
     expect(wakePass.reviewParticipantRequeued).toBe(1);
-    expect(enqueueWakeup).toHaveBeenCalledTimes(1);
-    expect(enqueueWakeup).toHaveBeenCalledWith(reviewerId, expect.anything());
+    const dispatch = runStatus === "failed" ? scheduleRecoveryRetry : enqueueWakeup;
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    if (runStatus === "failed") {
+      expect(scheduleRecoveryRetry).toHaveBeenCalledWith(reviewerRunId);
+      expect(enqueueWakeup).not.toHaveBeenCalled();
+    } else {
+      expect(enqueueWakeup).toHaveBeenCalledWith(reviewerId, expect.anything());
+      expect(scheduleRecoveryRetry).not.toHaveBeenCalled();
+    }
     expect(enqueueWakeup).not.toHaveBeenCalledWith(managerId, expect.anything());
     const [afterWake] = await db.select().from(issues).where(eq(issues.id, sourceIssueId));
     expect(afterWake?.executionState).toEqual(beforeWakeState);
     const repeat = await recovery.reconcileStrandedAssignedIssues();
     expect(repeat.reviewParticipantRequeued).toBe(0);
-    expect(enqueueWakeup).toHaveBeenCalledTimes(1);
+    expect(dispatch).toHaveBeenCalledTimes(1);
     const [afterRepeat] = await db.select().from(issues).where(eq(issues.id, sourceIssueId));
     expect(afterRepeat?.executionState).toEqual(afterWake?.executionState);
   });
@@ -3255,3 +3288,4 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(actionRow?.status).toBe("active");
   });
 });
+
