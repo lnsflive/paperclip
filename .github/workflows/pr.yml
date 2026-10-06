@@ -4,6 +4,7 @@ on:
   pull_request:
     branches:
       - master
+      - eco-runtime-v2026.722.0
 
 concurrency:
   group: pr-${{ github.event.pull_request.number }}
