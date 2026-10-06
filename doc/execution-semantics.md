@@ -707,6 +707,17 @@ After a productive successful run, recovery checks that the issue is still `in_p
 
 The same bounded rule applies when the previous heartbeat reported waiting on a local/background watcher and that watcher was killed, disappeared, or was never represented by a durable Paperclip primitive. Paperclip queues at most one continuation for the same recovery fingerprint. If the continuation also leaves only local watcher evidence, Paperclip must surface a real blocker or explicit recovery action instead of repeating continuation recovery. A new monitor, scheduled wake, healthy delegated blocker issue, or other durable source mutation resolves that recovery fingerprint normally.
 
+A run cancelled with `issue_dependencies_blocked` does not need stranded-work
+recovery while its source still has an unresolved first-class blocker. Repeated
+reconciliation preserves the source status and assignee. Recovery rechecks the
+source and blocker before creating an action. Concurrent escalation calls for the
+same source are serialized within the server process without holding an outer
+database transaction across service calls.
+
+This guard applies only to dependency-wait cancellations. Workspace validation,
+process loss, and other failures remain eligible for recovery even when a blocker
+exists. The blocker itself remains subject to the normal recovery rules.
+
 #### Deliberate wait is not a lost run
 
 A continuation that the staleness gate cancelled with `issue_continuation_waiting_on_review` is a *deliberate park*, not a disappeared execution path. The latest run reported that the issue is waiting for review/approval (for example, an umbrella issue whose work was just decomposed into sub-tasks). Treating that park as a stranded run would retry it, then escalate it to `blocked` with a recovery action and an operator-facing failure notice — even though nothing failed and there is nothing for a human to do.

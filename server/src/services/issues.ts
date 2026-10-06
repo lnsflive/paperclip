@@ -128,6 +128,7 @@ import {
   type ParsedExecutionWorkspaceMode,
 } from "./execution-workspace-policy.js";
 import { mergeExecutionWorkspaceConfig } from "./execution-workspaces.js";
+import { assertIssueUpdateSnapshot, type IssueUpdateCasOptions } from "./issue-update-cas.js";
 import { hasChatRunOwnedProviderInteraction } from "./chat-interaction-arbitration.js";
 import { readChatControlChronology } from "./chat-control-chronology.js";
 import { authorizeChatConversationForBoundRun } from "./native-runtime/chat-attachment-reuse.js";
@@ -140,6 +141,7 @@ import {
   retryNativeChatReviewPresentation,
 } from "./native-runtime/native-chat-review-presentation.js";
 import {
+  applyIssueExecutionPolicyTransition,
   buildInitialIssueMonitorFields,
   normalizeIssueExecutionPolicy,
 } from "./issue-execution-policy.js";
@@ -285,6 +287,15 @@ export async function executeIssuePostCommitActions(
       );
     }
   }
+}
+
+/** Serialize concurrent changes to an issue's blocker relations. */
+export async function lockIssueDependencyMutation(
+  dbOrTx: { execute: (query: SQL) => Promise<unknown> },
+  companyId: string,
+  issueId: string,
+) {
+  await dbOrTx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`${companyId}:${issueId}`}, 0))`);
 }
 
 function wakeRequestTargetsIssue(issueId: string) {
@@ -7431,6 +7442,7 @@ export function issueService(db: Db) {
     actor: { agentId?: string | null; userId?: string | null } = {},
     dbOrTx: any = db,
   ) {
+    await lockIssueDependencyMutation(dbOrTx, companyId, issueId);
     const deduped = [...new Set(blockedByIssueIds)];
     if (deduped.some((candidate) => candidate === issueId)) {
       throw unprocessable("Issue cannot be blocked by itself");
@@ -10649,7 +10661,7 @@ export function issueService(db: Db) {
       dbOrTx: any = db,
       postCommitActivityPublications?: ActivityPublication[],
       postCommitActions?: IssuePostCommitAction[],
-      options: { bindRuntimeSharedWorkspace?: boolean } = {},
+      options: IssueUpdateCasOptions & { bindRuntimeSharedWorkspace?: boolean } = {},
     ) => {
       const ownedActivityPublications: ActivityPublication[] = [];
       const activityPublications =
@@ -10672,6 +10684,7 @@ export function issueService(db: Db) {
         .where(idPredicate)
         .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
       if (!existing) return null;
+      assertIssueUpdateSnapshot(existing, options);
       if (data.parentId !== undefined && data.parentId !== existing.parentId) {
         await assertExecutionTaskParent(dbOrTx, existing.companyId, data.parentId);
       }
@@ -10929,6 +10942,43 @@ export function issueService(db: Db) {
         });
       }
 
+      if (
+        issueData.status === "in_review" &&
+        issueData.executionState === undefined &&
+        issueData.executionPolicy === undefined
+      ) {
+        const existingPolicy = normalizeIssueExecutionPolicy(existing.executionPolicy ?? null);
+        if (existingPolicy) {
+          const transition = applyIssueExecutionPolicyTransition({
+            issue: {
+              status: existing.status,
+              assigneeAgentId: existing.assigneeAgentId,
+              assigneeUserId: existing.assigneeUserId,
+              executionPolicy: existing.executionPolicy,
+              executionState: existing.executionState,
+              monitorNextCheckAt: existing.monitorNextCheckAt,
+              monitorWakeRequestedAt: existing.monitorWakeRequestedAt,
+              monitorLastTriggeredAt: existing.monitorLastTriggeredAt,
+              monitorAttemptCount: existing.monitorAttemptCount,
+              monitorNotes: existing.monitorNotes,
+              monitorScheduledBy: existing.monitorScheduledBy,
+            },
+            policy: existingPolicy,
+            previousPolicy: existingPolicy,
+            requestedStatus: "in_review",
+            requestedAssigneePatch: {
+              assigneeAgentId: issueData.assigneeAgentId,
+              assigneeUserId: issueData.assigneeUserId,
+            },
+            actor: {
+              agentId: actorAgentId ?? null,
+              userId: actorUserId ?? null,
+            },
+          });
+          Object.assign(patch, transition.patch);
+        }
+      }
+
       applyStatusSideEffects(issueData.status, patch);
       if (issueData.status && issueData.status !== "done") {
         patch.completedAt = null;
@@ -10965,6 +11015,7 @@ export function issueService(db: Db) {
           .for("update")
           .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
         if (!receiptExisting) return null;
+        assertIssueUpdateSnapshot(receiptExisting, options);
         if (actorAgentId && actorRunId) {
           // Recheck under a run lock: a request admitted before Stop must not
           // commit a late Done after cancellation revoked its credentials.

@@ -9657,6 +9657,107 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(issue?.assigneeAgentId).toBe(agentId);
   });
 
+  it("keeps a restored reviewer route live across repeated reconciliation when history still says changes_requested", async () => {
+    const { companyId, agentId, issueId, runId, wakeupRequestId, stageId } =
+      await seedInReviewParticipantRunFixture();
+    const sourceAssigneeAgentId = randomUUID();
+    const finishedAt = new Date("2026-03-19T00:05:00.000Z");
+
+    await db.insert(agents).values({
+      id: sourceAssigneeAgentId,
+      companyId,
+      name: "CodexImplementor",
+      role: "engineer",
+      status: "idle",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db
+      .update(issues)
+      .set({
+        executionRunId: null,
+        executionAgentNameKey: null,
+        executionLockedAt: null,
+        executionState: {
+          status: "pending",
+          currentStageId: stageId,
+          currentStageIndex: 0,
+          currentStageType: "review",
+          currentParticipant: { type: "agent", agentId, userId: null },
+          returnAssignee: { type: "agent", agentId: sourceAssigneeAgentId, userId: null },
+          reviewRequest: null,
+          completedStageIds: [],
+          lastDecisionId: randomUUID(),
+          lastDecisionOutcome: "changes_requested",
+        },
+      })
+      .where(eq(issues.id, issueId));
+    await db
+      .update(heartbeatRuns)
+      .set({
+        status: "succeeded",
+        startedAt: new Date("2026-03-19T00:00:00.000Z"),
+        finishedAt,
+        updatedAt: finishedAt,
+      })
+      .where(eq(heartbeatRuns.id, runId));
+    await db
+      .update(agentWakeupRequests)
+      .set({
+        status: "completed",
+        finishedAt,
+        updatedAt: finishedAt,
+      })
+      .where(eq(agentWakeupRequests.id, wakeupRequestId));
+
+    const heartbeat = heartbeatService(db);
+
+    const first = await heartbeat.reconcileStrandedAssignedIssues();
+    expect(first.reviewParticipantRequeued).toBe(1);
+    expect(first.escalated).toBe(0);
+    expect(first.issueIds).toEqual([issueId]);
+
+    const second = await heartbeat.reconcileStrandedAssignedIssues();
+    expect(second.reviewParticipantRequeued).toBe(0);
+    expect(second.escalated).toBe(0);
+
+    const sourceIssue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    expect(sourceIssue).toMatchObject({
+      status: "in_review",
+      assigneeAgentId: agentId,
+      assigneeUserId: null,
+    });
+    expect(sourceIssue?.executionState).toMatchObject({
+      status: "pending",
+      currentStageId: stageId,
+      currentStageType: "review",
+      currentParticipant: { type: "agent", agentId },
+      returnAssignee: { type: "agent", agentId: sourceAssigneeAgentId },
+      lastDecisionOutcome: "changes_requested",
+    });
+
+    const reviewerWakeups = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.agentId, agentId));
+    expect(reviewerWakeups.filter((wakeup) =>
+      wakeup.reason === "execution_review_participant_recovery" &&
+      wakeup.status !== "skipped"
+    )).toHaveLength(1);
+
+    const sourceAssigneeWakeups = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.agentId, sourceAssigneeAgentId));
+    expect(sourceAssigneeWakeups).toHaveLength(0);
+  });
+
   it("retries a pending execution-review participant once before blocking with a recovery action", async () => {
     const { companyId, agentId, issueId, runId, stageId } =
       await seedInReviewParticipantRunFixture();
@@ -13436,6 +13537,53 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(result.continuationRequeued).toBe(1);
     const next = (await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId))).find((r) => r.id !== runId);
     if (next) await waitForRunToSettle(heartbeat, next.id);
+  });
+
+  it("does not recreate recovery for a dependency-blocked source across repeated reconciliation", async () => {
+    const { companyId, agentId, issueId } = await seedStrandedIssueFixture({
+      status: "in_progress",
+      runStatus: "cancelled",
+      runErrorCode: "issue_dependencies_blocked",
+      runError: "Issue dependencies are blocked",
+    });
+    const blockerId = randomUUID();
+    const issuePrefix = `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`;
+    await db.insert(issues).values({
+      id: blockerId,
+      companyId,
+      title: "First-class blocker",
+      status: "todo",
+      priority: "high",
+      issueNumber: 2,
+      identifier: `${issuePrefix}-2`,
+    });
+    await db.insert(issueRelations).values({
+      companyId,
+      issueId: blockerId,
+      relatedIssueId: issueId,
+      type: "blocks",
+    });
+
+    const heartbeat = heartbeatService(db);
+    const first = await heartbeat.reconcileStrandedAssignedIssues();
+    const second = await heartbeat.reconcileStrandedAssignedIssues();
+
+    expect(first.escalated).toBe(0);
+    expect(second.escalated).toBe(0);
+    expect(first.skipped).toBe(1);
+    expect(second.skipped).toBe(1);
+    expect(await sourceBlockerIssueIds(companyId, issueId)).toEqual([blockerId]);
+    const source = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0]);
+    expect(source?.status).toBe("in_progress");
+    expect(source?.assigneeAgentId).toBe(agentId);
+    const recoveryActions = await db
+      .select()
+      .from(issueRecoveryActions)
+      .where(and(
+        eq(issueRecoveryActions.companyId, companyId),
+        eq(issueRecoveryActions.sourceIssueId, issueId),
+      ));
+    expect(recoveryActions).toHaveLength(0);
   });
 
   it("repairs missing disposition independently of the productive diagnostic label", async () => {

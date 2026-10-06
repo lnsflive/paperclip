@@ -70,7 +70,7 @@ import {
   isNativeRunnerOwnershipHeld,
   nativeRunnerOwnershipNotHeldCondition,
 } from "../native-runtime/native-runner-ownership.js";
-import { visibleIssueCondition } from "../issue-visibility.js";
+import { visibleIssueCondition, visibleIssueSql } from "../issue-visibility.js";
 import { forbidden, notFound } from "../../errors.js";
 import { logger } from "../../middleware/logger.js";
 import {
@@ -176,6 +176,25 @@ const STRANDED_BOARD_ESCALATION_POLICY = "board_escalation_no_takeover_v1";
 const DISPOSITION_REPAIR_IDEMPOTENCY_INDEX =
   "agent_wakeup_requests_disposition_repair_idempotency_uq";
 const RESOLVED_DEPENDENCY_WAKE_BACKSTOP_CANDIDATE_LIMIT = 500;
+
+// Reconciliation can be invoked concurrently by the heartbeat sweep and a
+// terminal-run callback. Serialize the source-scoped recovery mutation so the
+// dependency revalidation and ownership update observe one logical decision.
+const strandedRecoveryMutationTails = new Map<string, Promise<void>>();
+
+async function withStrandedRecoveryMutationLock<T>(key: string, work: () => Promise<T>): Promise<T> {
+  const previous = strandedRecoveryMutationTails.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => { release = resolve; });
+  strandedRecoveryMutationTails.set(key, current);
+  await previous;
+  try {
+    return await work();
+  } finally {
+    release();
+    if (strandedRecoveryMutationTails.get(key) === current) strandedRecoveryMutationTails.delete(key);
+  }
+}
 
 // GGU-809: when a stranded `in_progress` issue would otherwise hit the
 // `isRepeatedProductiveContinuationRecovery` escalation path, exempt the
@@ -3909,7 +3928,7 @@ export function recoveryService(
     return scheduled ? "queued" : "skipped";
   }
 
-  async function escalateStrandedAssignedIssue(input: {
+  async function escalateStrandedAssignedIssueUnlocked(input: {
     issue: typeof issues.$inferSelect;
     previousStatus: StrandedPreviousStatus;
     latestRun: LatestIssueRun;
@@ -3926,10 +3945,29 @@ export function recoveryService(
       });
     }
 
-    const recoveryCause = resolveStrandedRecoveryCause(
-      input.latestRun,
-      input.recoveryCause,
-    );
+    // The liveness scan intentionally works from a snapshot. Revalidate at the
+    // mutation boundary as a blocker resolution can race a later reconciliation
+    // after the prior source-scoped action was resolved. In that case the stale
+    // cancelled dependency-wait run must not recreate recovery or rotate the
+    // source owner.
+    const currentIssue = await db
+      .select()
+      .from(issues)
+      .where(and(eq(issues.companyId, input.issue.companyId), eq(issues.id, input.issue.id)))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+    if (!currentIssue || ["done", "cancelled"].includes(currentIssue.status)) return null;
+    const recoveryCause = resolveStrandedRecoveryCause(input.latestRun, input.recoveryCause);
+    // Only suppress stranded recreation for a live dependency wait. Other
+    // recovery causes (workspace validation, process-lost, adapter failure)
+    // must still escalate even when a blocker edge already exists.
+    if (
+      input.latestRun?.errorCode === "issue_dependencies_blocked" &&
+      await hasUnresolvedFirstClassBlocker(currentIssue)
+    ) {
+      return null;
+    }
+
     const recoveryAction = await ensureSourceScopedStrandedRecoveryAction({
       issue: input.issue,
       previousStatus: input.previousStatus,
@@ -4161,6 +4199,17 @@ export function recoveryService(
     return updated;
   }
 
+  async function escalateStrandedAssignedIssue(input: Parameters<typeof escalateStrandedAssignedIssueUnlocked>[0]) {
+    // Do not wrap this in an outer transaction. update() already opens its
+    // own tx and takes the advisory lock inside setBlockedBy. Holding an
+    // outer tx across later root-db reads (revalidate, comments, wake) deadlocks
+    // DATABASE_POOL_MAX=1 and leaves the source in_progress.
+    return withStrandedRecoveryMutationLock(
+      `${input.issue.companyId}:${input.issue.id}`,
+      () => escalateStrandedAssignedIssueUnlocked(input),
+    );
+  }
+
   async function persistAdapterFailureRecoveryClassification(
     latestRun: NonNullable<LatestIssueRun>,
     classification: NonNullable<AdapterFailureRecoveryClassification>,
@@ -4305,6 +4354,34 @@ export function recoveryService(
         ? pendingExecutionState.currentParticipant
         : null;
     return participant?.type === "agent" ? participant.agentId : null;
+  }
+
+  async function hasUnresolvedFirstClassBlocker(issue: typeof issues.$inferSelect) {
+    try {
+      const blocker = await db
+        .select({ id: issueRelations.issueId })
+        .from(issueRelations)
+        .innerJoin(issues, eq(issues.id, issueRelations.issueId))
+        .where(
+          and(
+            eq(issueRelations.companyId, issue.companyId),
+            eq(issueRelations.relatedIssueId, issue.id),
+            eq(issueRelations.type, "blocks"),
+            eq(issues.companyId, issue.companyId),
+            sql.raw(visibleIssueSql("issues")),
+            notInArray(issues.status, ["done", "cancelled"]),
+          ),
+        )
+        .limit(1)
+        // A terminal-run callback may be holding the issue row while it writes
+        // the dependency-blocked verdict. Do not wait behind that mutation:
+        // an uncertain blocker read is conservatively treated as a live wait.
+        .for("key share", { of: issues, noWait: true });
+      return blocker.length > 0;
+    } catch (error) {
+      if ((error as { code?: string })?.code === "55P03") return true;
+      throw error;
+    }
   }
 
   function hasPendingProviderQuotaRecoveryMonitor(
@@ -4699,10 +4776,17 @@ export function recoveryService(
         result.skipped += 1;
         continue;
       }
+      // An unresolved first-class blocker is the authoritative live wait path
+      // only for cancelled dependency-wait runs. Do not skip workspace
+      // validation or other stranded causes just because a blocker exists.
       if (
-        isStrandedIssueRecoveryIssue(issue) &&
-        isUnsuccessfulTerminalIssueRun(latestRun)
+        latestRun?.errorCode === "issue_dependencies_blocked" &&
+        await hasUnresolvedFirstClassBlocker(issue)
       ) {
+        result.skipped += 1;
+        continue;
+      }
+      if (isStrandedIssueRecoveryIssue(issue) && isUnsuccessfulTerminalIssueRun(latestRun)) {
         const updated = await escalateStrandedRecoveryIssueInPlace({
           issue,
           previousStatus: issue.status as StrandedPreviousStatus,
