@@ -3288,4 +3288,3 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(actionRow?.status).toBe("active");
   });
 });
-
