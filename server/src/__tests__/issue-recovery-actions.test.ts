@@ -2155,6 +2155,36 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     });
   });
 
+  it("allows board actors to terminalize the orphan projection and records user attribution", async () => {
+    const { orphanIssueId, recoveryActionId } = await seedOrphanExecutionTerminalizationFixture();
+    const [before] = await db.select().from(issues).where(eq(issues.id, orphanIssueId));
+    const app = createApp({ type: "board", source: "local_implicit", userId: "lead-user" });
+
+    const response = await request(app)
+      .post(`/api/issues/${orphanIssueId}/execution-projection/terminalize`)
+      .send({
+        recoveryActionId,
+        reason: "Board repair of orphan execution projection",
+        evidencePointers: ["test:board-terminalization"],
+        expectedExecutionState: before!.executionState,
+      })
+      .expect(200);
+
+    expect(response.body.issue.executionState).toMatchObject({
+      status: "completed",
+      currentStageId: null,
+      currentStageIndex: null,
+      currentStageType: null,
+      currentParticipant: null,
+      lastDecisionOutcome: "approved",
+    });
+    const [activity] = await db.select().from(activityLog).where(and(
+      eq(activityLog.entityId, orphanIssueId),
+      eq(activityLog.action, "issue.execution_projection_terminalized"),
+    ));
+    expect(activity).toMatchObject({ actorType: "user", actorId: "lead-user" });
+  });
+
   it("rejects orphan execution terminalization when CAS preconditions do not match", async () => {
     const { companyId, managerId, orphanIssueId, recoveryActionId } = await seedOrphanExecutionTerminalizationFixture();
     const runId = randomUUID();

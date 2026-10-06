@@ -5705,7 +5705,7 @@ export function issueRoutes(
     if (!issue) return;
     const mutationDecision = await decideIssueAccess(req, issue, "issue:mutate");
     if (!mutationDecision.allowed) return res.status(403).json({ error: "Issue is outside this actor's mutation authorization boundary" });
-    if (req.actor.type !== "user" && req.actor.type !== "agent") return res.status(403).json({ error: "Unsupported actor" });
+    if (req.actor.type !== "board" && req.actor.type !== "agent") return res.status(403).json({ error: "Unsupported actor" });
     const body = req.body as Record<string, unknown>;
     if (typeof body.recoveryActionId !== "string" || body.recoveryActionId.trim() === "" || typeof body.reason !== "string" || body.reason.trim() === "" || !Array.isArray(body.evidencePointers) || body.evidencePointers.length === 0 || body.evidencePointers.some((value) => typeof value !== "string" || value.trim() === "") || !body.expectedExecutionState || typeof body.expectedExecutionState !== "object") {
       return res.status(400).json({ error: "recoveryActionId, reason, evidencePointers, and expectedExecutionState are required" });

@@ -170,7 +170,7 @@ export async function terminalizeOrphanExecutionProjection(
       currentParticipant: null,
     };
     const updated = await tx.update(issues).set({ executionState: after, updatedAt: new Date() })
-      .where(and(eq(issues.id, issue.id), eq(issues.status, "done"), eq(issues.executionState, currentState as Record<string, unknown>)))
+      .where(and(eq(issues.id, issue.id), eq(issues.status, "done"), eq(issues.executionState, { ...currentState })))
       .returning();
     if (updated.length !== 1) return null;
     await tx.insert(activityLog).values({
